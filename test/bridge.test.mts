@@ -236,7 +236,7 @@ test("bridge round trip: start broker, spawn, both directions, replay until ack,
     const [row] = body.crew;
     assert.deepEqual([row.n, row.name, row.waitingOnLead, row.cwd, row.id], [1, "api", false, tmp, workerId]);
     assert.match(row.lastMessage, /^\d+m ago$/);
-    assert.match(row.live, /^\S+ \d+m$/);
+    assert.equal(row.live, "status unknown", "no status from this client, and first seen by this bridge: no duration");
   });
 
   await t.test("a worker that leaves the broker stays live while its session is open, is stopped once closed", async () => {
@@ -305,7 +305,7 @@ test("lead feedback: default-branch guard, DONE checks, idle alerts, send by ses
   const wt = join(tmp, "repo-wt");
   await g(main, "worktree", "add", "-q", "-b", "feat/x", wt);
 
-  const b = new Bridge(key, e2);
+  let b = new Bridge(key, e2);
   t.after(() => b.stop());
   const lead2 = stableId("pi-crew-lead", key);
   await b.next(e => e.type === "ready");
@@ -368,5 +368,32 @@ test("lead feedback: default-branch guard, DONE checks, idle alerts, send by ses
     const row = body.crew.find((r: any) => r.name === "slim");
     assert.deepEqual([row.waitingOnLead, row.question, row.state], [true, "merge now?", "ask"]);
     assert.match(row.live, /^idle \d+m$/);
+  });
+
+  await t.test("an answer sent by session name in another case updates the worker record", async () => {
+    const sent = await call({ op: "send", to: "SLIM", text: "yes, merge" }, key, e2);
+    assert.equal(sent.code, 0, JSON.stringify(sent.body));
+    await b.next(e => e.type === "workers" && e.workers.some((w: any) => w.name === "slim" && w.state === "work" && !w.ask));
+    await b.next(e => e.type === "feed" && e.msg.kind === "out" && e.msg.text === "yes, merge" && e.msg.worker === "slim");
+  });
+
+  await t.test("two spawns of one name at once: exactly one wins", async () => {
+    const both = await Promise.all([1, 2].map(() => call({ op: "spawn", name: "dup", cwd: wt, task: "x" }, key, e2)));
+    assert.deepEqual(both.map(r => r.code).sort(), [0, 1]);
+    assert.match(both.find(r => r.code === 1)!.body.error, /worker dup already exists/);
+  });
+
+  await t.test("a DONE replayed from the inbox after a restart gets its checks", async () => {
+    await b.stop();
+    const inboxFile = join(e2.PI_CREW_DIR, key, "inbox.json");
+    const id = "replayed-done-1";
+    writeFileSync(inboxFile, JSON.stringify([{
+      type: "message", from: { id: slimId, name: "slim", cwd: wt, worker: "slim" }, id, expectsReply: false, kind: "done", text: "DONE: shipped",
+    }]));
+    b = new Bridge(key, e2);
+    const ev = await b.next(e => e.type === "message" && e.id === id);
+    assert.equal(ev.checks?.ok, false);
+    assert.match(ev.checks.notes[0], /^missing head/);
+    assert.ok(JSON.parse(readFileSync(inboxFile, "utf8")).find((m: any) => m.id === id).checks, "stored with its checks");
   });
 });

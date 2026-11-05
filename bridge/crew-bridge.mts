@@ -15,7 +15,7 @@ import { promisify } from "node:util";
 
 import {
   DEFAULT_MODEL, FEED_REPLAY, crewRoot, prune, GROUP_NAME, KEY, WORKER_NAME, appendLine, applyIn, applyOut, classify, controlPath, crewDir,
-  defaultBranch, idleDue, idleMs, intercomPkg, launchScript, nextNumber, parseDone, parseSessionId, readLines, resolveTarget, stableId,
+  defaultBranch, idleDue, idleMs, intercomPkg, launchScript, nextNumber, parseDone, parseSessionId, quietSince, readLines, resolveTarget, stableId,
   trackLive, upgrade, verifyDone, workerBrief, type Git, type Live, type Msg, type SessionInfo, type Worker,
 } from "./lib.mts";
 
@@ -180,22 +180,38 @@ async function serve(key: string, leadName: string) {
     }, 250);
   };
 
+  // A message reaches the lead in arrival order, after a DONE's git checks. It is stored and receipted first, so a
+  // slow check never runs into the broker's receipt timeout, and a restart replays it with the checks redone.
+  let announcing: Promise<void> = Promise.resolve();
+  const announce = (event: Inbound) => {
+    announcing = announcing
+      .then(async () => {
+        const w = event.from.worker ? workers.get(event.from.worker) : undefined;
+        if (w && event.kind === "done" && !event.checks) {
+          const { text } = classify(event.text);
+          event = { ...event, checks: await verifyDone(parseDone(text), w.cwd, git) };
+          if (inbox.has(event.id)) {
+            inbox.set(event.id, event);
+            saveInbox();
+          }
+        }
+        emit(event);
+      })
+      .catch(error => emit({ type: "error", error: `announce: ${String(error)}` }));
+  };
   const persist = (event: Inbound) => {
     inbox.set(event.id, event);
     saveInbox();
-    emit(event);
+    announce(event);
   };
 
-  // One at a time, in arrival order: a DONE waits on git before it is stored.
-  let receiving: Promise<void> = Promise.resolve();
-  const receive = async (from: { id: string; name?: string; cwd: string }, message: {
+  // Handlers first: the broker flushes queued mailbox messages at registration.
+  client.on("message", (from: { id: string; name?: string; cwd: string }, message: {
     id: string; replyTo?: string; expectsReply?: boolean; content: { text: string };
   }) => {
     if (!inbox.has(message.id) && !feedIds.has(message.id)) {
       const worker = workerName(from.id);
       const { kind, text } = classify(message.content.text, message.expectsReply === true);
-      const w = worker ? workers.get(worker) : undefined;
-      const checks = w && kind === "done" ? await verifyDone(parseDone(text), w.cwd, git) : undefined;
       const event: Inbound = {
         type: "message",
         from: { id: from.id, name: from.name, cwd: from.cwd, worker },
@@ -204,8 +220,9 @@ async function serve(key: string, leadName: string) {
         expectsReply: message.expectsReply === true,
         kind,
         text: message.content.text,
-        ...(checks ? { checks } : {}),
       };
+      inbox.set(message.id, event);
+      saveInbox();
       if (event.expectsReply) {
         pendingAsks.set(message.id, Date.now());
         saveAsks();
@@ -214,25 +231,16 @@ async function serve(key: string, leadName: string) {
         id: message.id, at: Date.now(), kind, text, peer: worker ?? from.name ?? from.id,
         ...(worker ? { worker } : {}), ...(message.replyTo ? { replyTo: message.replyTo } : {}),
       };
-      inbox.set(message.id, event);
-      saveInbox();
       record(msg);
-      const cur = worker ? workers.get(worker) : undefined;
-      if (cur) {
-        workers.set(cur.name, applyIn(cur, msg));
+      const w = worker ? workers.get(worker) : undefined;
+      if (w) {
+        workers.set(w.name, applyIn(w, msg));
         saveWorkers();
       }
-      emit(event);
+      announce(event);
     }
     // Stored on disk: tell the sender it arrived. A crash before this makes the sender see a retryable failure.
     client.sendMessageReceipt({ messageId: message.id, status: "receiver_received", timestamp: Date.now() });
-  };
-
-  // Handlers first: the broker flushes queued mailbox messages at registration.
-  client.on("message", (from: { id: string; name?: string; cwd: string }, message: {
-    id: string; replyTo?: string; expectsReply?: boolean; content: { text: string };
-  }) => {
-    receiving = receiving.then(() => receive(from, message)).catch(error => emit({ type: "error", error: `receive: ${String(error)}` }));
   });
   client.onBrokerMessage((m: { type: string; sessionId?: string; session?: SessionInfo }) => {
     if (m.session?.id && (m.type === "session_joined" || m.type === "presence_update")) noteLive(m.session);
@@ -288,7 +296,7 @@ async function serve(key: string, leadName: string) {
       workers.set(w.name, { ...w, alertedAt: now });
       saveWorkers();
       const l = live.get(w.id);
-      const quiet = ago(Math.max(w.lastAt, l?.since ?? 0), now);
+      const quiet = ago(quietSince(w, l), now);
       let screen = "";
       try {
         screen = (await agterm(["session", "text", "--target", w.agtermSession!, "--lines", String(IDLE_SCREEN_LINES)])).trimEnd();
@@ -325,7 +333,7 @@ async function serve(key: string, leadName: string) {
             return {
               n: w.n, name: w.name, state: w.state, waitingOnLead: w.state === "ask", unread: w.unread,
               lastMessage: `${ago(w.lastAt, now)} ago`,
-              live: l ? `${l.status ?? "?"} ${ago(l.since, now)}` : w.state === "gone" ? "stopped" : "not on intercom",
+              live: l ? `${l.status ?? "status unknown"}${l.fresh ? "" : ` ${ago(l.since, now)}`}` : w.state === "gone" ? "stopped" : "not on intercom",
               ...(l?.contextPct != null ? { contextPct: l.contextPct } : {}),
               ...(w.ask ? { question: w.ask.text } : {}),
               ...(w.group ? { group: w.group } : {}),
@@ -343,8 +351,8 @@ async function serve(key: string, leadName: string) {
         if (inbox.delete(req.id)) saveInbox();
         return { acked: req.id };
       case "send": {
-        const named = workers.get(req.to);
-        const { id: target, worker: w } = named ? { id: named.id, worker: named } : resolveTarget(req.to, workers.values(), await client.listSessions());
+        const sessions: SessionInfo[] = workers.has(req.to) ? [] : await client.listSessions();
+        const { id: target, worker: w } = resolveTarget(req.to, workers.values(), sessions);
         // A reply to a Q: report or any plain message is threaded locally only.
         const askReply = req.replyTo && pendingAsks.has(req.replyTo) ? req.replyTo : undefined;
         let result = await client.send(target, { text: req.text, ...(askReply ? { replyTo: askReply } : {}) });
@@ -390,15 +398,16 @@ async function serve(key: string, leadName: string) {
         }
         const parent = process.env.AGTERM_SESSION_ID;
         if (!parent) throw new Error("not running inside agterm (AGTERM_SESSION_ID unset)");
-        if (req.task && !req.allowDefaultBranch) {
-          const branch = await git(req.cwd, ["branch", "--show-current"]);
-          const base = branch ? await defaultBranch(git, req.cwd) : undefined;
-          if (branch && branch === base) {
-            throw new Error(`${req.cwd} is on the default branch ${base}; give the worker its own worktree, or pass allowDefaultBranch: true`);
-          }
-        }
+        // Claimed before any await, so a second spawn of this name fails the check above.
         spawning.add(req.name);
         try {
+          if (req.task && !req.allowDefaultBranch) {
+            const branch = await git(req.cwd, ["branch", "--show-current"]);
+            const base = branch ? await defaultBranch(git, req.cwd) : undefined;
+            if (branch && branch === base) {
+              throw new Error(`${req.cwd} is on the default branch ${base}; give the worker its own worktree, or pass allowDefaultBranch: true`);
+            }
+          }
           const now = Date.now();
           const worker: Worker = {
             name: req.name,
@@ -527,7 +536,7 @@ async function serve(key: string, leadName: string) {
     type: "ready", lead, agtermSession: process.env.AGTERM_SESSION_ID ?? null,
     workers: [...workers.values()], feed: readLines<Msg>(feedFile, FEED_REPLAY),
   });
-  for (const pending of inbox.values()) emit(pending);
+  for (const pending of inbox.values()) announce(pending);
   publishRoster();
 }
 

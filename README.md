@@ -117,7 +117,7 @@ Keys in the pane: `1` `2` tabs, `a` `q` `w` `i` `x` filters, `b` back, `y` `n` q
 | --- | --- |
 | `mcp__pi-crew__spawn` `{name, cwd, task?, group?, model?, allowDefaultBranch?}` | Start `pi-work` in a new agterm session. `model` defaults to `router/openai-work` (`PI_CREW_DEFAULT_MODEL`). With a task, a `cwd` on the default branch is refused unless `allowDefaultBranch` is set. |
 | `mcp__pi-crew__send` `{to, text, replyTo?}` | Message a worker by name, or any session by full id, session name (any case) or a unique id prefix of 6+ characters. An ambiguous or unknown name fails and lists the live sessions. |
-| `mcp__pi-crew__list` | The crew, one row per worker: state, `waitingOnLead`, unread, time since the last message, live intercom status and how long it has held, context %, open question. Then the live intercom sessions. |
+| `mcp__pi-crew__list` | The crew, one row per worker: state, `waitingOnLead`, unread, time since the last message, live intercom status with the time since it last turned busy or idle (no time when the bridge has only just seen it), context %, open question. Then the live intercom sessions. |
 | `mcp__pi-crew__stop` `{name}` | Close a worker's session. Stop again to forget it. |
 
 ## How it works

@@ -13,7 +13,7 @@ This session is a peer on pi-intercom, like a Pi agent. The pi-crew mod holds it
 | --- | --- |
 | `mcp__pi-crew__spawn` `{name, cwd, task?, group?, model?, allowDefaultBranch?}` | Start `pi-work` in a new agterm session after this one. Give `task` to start work at once. `group` (e.g. `backend`) groups workers in the pane. `model` is a Pi router profile, default `router/openai-work`. A task in a checkout on the default branch is refused: give the worker a worktree, or set `allowDefaultBranch` for work that edits nothing. |
 | `mcp__pi-crew__send` `{to, text, replyTo?}` | Message a worker by name, or any session by full id, session name (any case) or unique id prefix. A miss lists the live sessions. |
-| `mcp__pi-crew__list` | One row per worker: state, `waitingOnLead`, unread, `lastMessage` age, `live` intercom status and how long it has held, `contextPct`, open `question`. Then the live intercom sessions. |
+| `mcp__pi-crew__list` | One row per worker: state, `waitingOnLead`, unread, `lastMessage` age, `live` intercom status with the time since it last turned busy or idle (`tool:bash 40m` means busy for 40 minutes, not one 40-minute command), `contextPct`, open `question`. Then the live intercom sessions. |
 | `mcp__pi-crew__stop` `{name}` | Close a worker's agterm session. It stays listed as stopped for 30 minutes; stopping it again forgets it. |
 
 If the tools are missing, the mod is not loaded (run `/reload-plugins`) or this session is not interactive. Spawning needs Claude Code running inside agterm.

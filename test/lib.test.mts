@@ -135,12 +135,13 @@ test("idleMs reads PI_CREW_IDLE_MIN; 0, junk and negatives turn the alert off", 
   for (const [raw, ms] of cases) assert.equal(idleMs({ PI_CREW_IDLE_MIN: raw }), ms, String(raw));
 });
 
-test("trackLive moves `since` only when a session turns idle or busy", () => {
+test("trackLive moves `since` only when a session turns idle or busy; a first sighting is fresh until it does", () => {
   const a = trackLive(undefined, { status: "thinking" }, 1);
   const b = trackLive(a, { status: "tool:bash", contextPct: 40 }, 2);
   const c = trackLive(b, { status: "idle · waiting on CI" }, 3);
   const d = trackLive(c, { status: "idle" }, 4);
   assert.deepEqual([a.since, b.since, c.since, d.since], [1, 1, 3, 3]);
+  assert.deepEqual([a.fresh, b.fresh, c.fresh, d.fresh], [true, true, undefined, undefined]);
   assert.equal(b.contextPct, 40);
 });
 
@@ -159,6 +160,9 @@ test("idleDue: a working worker quiet past the threshold, once per idle stretch"
     ["already alerted this stretch", { ...w, alertedAt: 1000 }, idle, 5000, false],
     ["new message after the alert", { ...w, alertedAt: 1000, lastAt: 2000 }, idle, 3000, true],
     ["went idle again after the alert", { ...w, alertedAt: 1000 }, { status: "idle", since: 2000 }, 3000, true],
+    ["bridge restarted mid-stretch: no repeat", { ...w, alertedAt: 1000 }, { status: "idle", since: 2000, fresh: true }, 9000, false],
+    ["bridge restarted, never alerted", w, { status: "idle", since: 5000, fresh: true }, 1000, true],
+    ["dropped off and back after the alert: no repeat", { ...w, alertedAt: 1000 }, undefined, 9000, false],
   ];
   for (const [what, worker, live, now, due] of cases) assert.equal(idleDue(worker, live, now, ms), due, what);
   assert.equal(idleDue(w, idle, 1e9, 0), false, "disabled");
@@ -172,6 +176,8 @@ test("resolveTarget: worker, exact id, session name in any case, unique id prefi
     { id: "33333333-dddd-4ddd-8ddd-000000000004", name: "twin" },
   ];
   assert.deepEqual(resolveTarget("api", [api], sessions), { id: api.id, worker: api });
+  const withApi = [...sessions, { id: api.id, name: "api" }];
+  for (const to of ["API", api.id, "111111"]) assert.deepEqual(resolveTarget(to, [api], withApi), { id: api.id, worker: api }, `${to} reaches the worker record`);
   assert.equal(resolveTarget(sessions[0]!.id, [api], sessions).id, sessions[0]!.id);
   assert.equal(resolveTarget("ci-agent", [api], sessions).id, sessions[0]!.id);
   assert.equal(resolveTarget("222222", [api], sessions).id, sessions[0]!.id);
@@ -184,10 +190,10 @@ test("resolveTarget: worker, exact id, session name in any case, unique id prefi
   assert.throws(() => resolveTarget("nobody", [], []), /live: none/);
 });
 
-test("parseDone reads the report fields; the first of each wins", () => {
+test("parseDone reads the report fields; the last of each wins over a body line that looks like one", () => {
   const text = [
-    "fixed verify.sh", "", "head: `abc1234def`", "- branch: feat/x,", "tests: bin/test --filter verify", "rc=0",
-    "logs: /tmp/a.log /tmp/b.log", "head: ffff",
+    "fixed verify.sh", "rc: 1 on the first run, fixed the flake", "Branch: rebased onto main", "",
+    "head: `abc1234def`", "- branch: feat/x,", "tests: bin/test --filter verify", "rc=0", "logs: /tmp/a.log /tmp/b.log",
   ].join("\n");
   assert.deepEqual(parseDone(text), { head: "abc1234def", branch: "feat/x", tests: "bin/test --filter verify", rc: "0", logs: "/tmp/a.log /tmp/b.log" });
   assert.deepEqual(parseDone("all good"), {});

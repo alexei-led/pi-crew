@@ -80,8 +80,11 @@ export type Worker = {
   alertedAt?: number;
 };
 
-/** What the broker's presence says about a session: Pi's lifecycle status, since when, and context use. */
-export type Live = { status?: string; since: number; contextPct?: number };
+/**
+ * What the broker's presence says about a session: Pi's lifecycle status, since when, and context use. `fresh`: first
+ * seen in this state by this bridge (after a start or a reconnect), so `since` is when we noticed, not when it began.
+ */
+export type Live = { status?: string; since: number; fresh?: boolean; contextPct?: number };
 /** A broker session as presence and listSessions report it. */
 export type SessionInfo = { id: string; name?: string; status?: string; cwd?: string; model?: string; contextPct?: number; lastActivity?: number };
 
@@ -90,8 +93,10 @@ export const isIdleStatus = (status?: string) => /^idle\b/.test(status ?? "");
 
 /** `since` moves only when the session goes from busy to idle or back; heartbeats keep it. */
 export function trackLive(prev: Live | undefined, s: Pick<SessionInfo, "status" | "contextPct">, now: number): Live {
-  const changed = !prev || isIdleStatus(prev.status) !== isIdleStatus(s.status);
-  return { status: s.status, since: changed ? now : prev.since, ...(s.contextPct != null ? { contextPct: s.contextPct } : {}) };
+  const ctx = s.contextPct != null ? { contextPct: s.contextPct } : {};
+  if (!prev) return { status: s.status, since: now, fresh: true, ...ctx };
+  if (isIdleStatus(prev.status) !== isIdleStatus(s.status)) return { status: s.status, since: now, ...ctx };
+  return { status: s.status, since: prev.since, ...(prev.fresh ? { fresh: true } : {}), ...ctx };
 }
 
 /**
@@ -101,9 +106,13 @@ export function trackLive(prev: Live | undefined, s: Pick<SessionInfo, "status" 
 export function idleDue(w: Worker, live: Live | undefined, now: number, ms: number): boolean {
   if (!ms || w.state !== "work" || !w.agtermSession) return false;
   if (live && !isIdleStatus(live.status)) return false;
-  const quietSince = Math.max(w.lastAt, live?.since ?? 0);
-  return now - quietSince >= ms && !(w.alertedAt && w.alertedAt >= quietSince);
+  const since = quietSince(w, live);
+  return now - since >= ms && !(w.alertedAt && w.alertedAt >= since);
 }
+
+/** When the worker's current quiet stretch began. A fresh entry's `since` is only when this bridge noticed it. */
+export const quietSince = (w: Pick<Worker, "lastAt">, live: Live | undefined) =>
+  Math.max(w.lastAt, live && !live.fresh ? live.since : 0);
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ID_PREFIX_MIN = 6;
@@ -114,15 +123,21 @@ const ID_PREFIX_MIN = 6;
  */
 export function resolveTarget(to: string, workers: Iterable<Worker>, sessions: SessionInfo[]): { id: string; worker?: Worker } {
   const t = to.trim();
-  const w = [...workers].find(x => x.name === t);
+  const list = [...workers];
+  // Whatever names a crew worker's session resolves to that worker, so the send updates its record.
+  const found = (id: string) => {
+    const worker = list.find(x => x.id === id);
+    return worker ? { id, worker } : { id };
+  };
+  const w = list.find(x => x.name === t);
   if (w) return { id: w.id, worker: w };
-  if (sessions.some(s => s.id === t) || UUID.test(t)) return { id: t };
+  if (sessions.some(s => s.id === t) || UUID.test(t)) return found(t);
   const describe = (list: SessionInfo[]) => list.map(s => `${s.name ?? "?"} (${s.id})`).join(", ");
   const byName = sessions.filter(s => s.name?.toLowerCase() === t.toLowerCase());
-  if (byName.length === 1) return { id: byName[0]!.id };
+  if (byName.length === 1) return found(byName[0]!.id);
   if (byName.length > 1) throw new Error(`"${t}" names ${byName.length} sessions: ${describe(byName)}; pass the full id`);
   const byPrefix = t.length >= ID_PREFIX_MIN ? sessions.filter(s => s.id.startsWith(t)) : [];
-  if (byPrefix.length === 1) return { id: byPrefix[0]!.id };
+  if (byPrefix.length === 1) return found(byPrefix[0]!.id);
   if (byPrefix.length > 1) throw new Error(`"${t}" is a prefix of ${byPrefix.length} ids: ${describe(byPrefix)}`);
   throw new Error(`no worker or session named "${t}"; live: ${describe(sessions) || "none"}`);
 }
@@ -131,14 +146,16 @@ export function resolveTarget(to: string, workers: Iterable<Worker>, sessions: S
 export const DONE_FIELDS = ["head", "branch", "tests", "rc", "logs"] as const;
 export type DoneFields = Partial<Record<(typeof DONE_FIELDS)[number], string>>;
 
-/** Reads `key: value` lines of a DONE report. head, branch and rc take one token; tests and logs the rest of the line. */
+/**
+ * Reads `key: value` lines of a DONE report. The brief puts them last, so the last of each wins over a body line that
+ * happens to start the same way. head, branch and rc take one token; tests and logs the rest of the line.
+ */
 export function parseDone(text: string): DoneFields {
   const out: DoneFields = {};
   for (const line of text.split("\n")) {
     const m = /^\s*[-*]?\s*(head|branch|tests|rc|logs)\s*[:=]\s*(.+?)\s*$/i.exec(line);
     if (!m) continue;
     const key = m[1]!.toLowerCase() as keyof DoneFields;
-    if (out[key] !== undefined) continue;
     out[key] = key === "tests" || key === "logs" ? m[2]! : m[2]!.split(/\s+/)[0]!.replace(/[`'",;]/g, "");
   }
   return out;

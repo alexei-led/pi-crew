@@ -89,7 +89,7 @@ const TOOLS = [
     name: 'list',
     description:
       'List the crew (number, name, state, waitingOnLead, unread, time since the last message, live intercom status ' +
-      'and how long it has held, context %, open question) and the live intercom sessions.',
+      'with the time since it last turned busy or idle, context %, open question) and the live intercom sessions.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
