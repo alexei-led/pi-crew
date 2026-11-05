@@ -1,52 +1,130 @@
 # pi-crew
 
-A Claude Code mod that makes a Claude Code session the lead of a crew of [Pi](https://github.com/badlogic/pi-mono) workers running in [agterm](https://agterm.dev). The lead spawns workers, sends them tasks, and is woken by their reports. Transport is [pi-intercom](https://github.com/nicobailon/pi-intercom), the local broker Pi already runs.
+A Claude Code mod that makes a Claude Code session the lead of a crew of [Pi](https://github.com/badlogic/pi-mono) workers in [agterm](https://agterm.dev). Claude spawns workers, gives them tasks, and is woken by their reports and questions. Transport is [pi-intercom](https://github.com/nicobailon/pi-intercom), the local broker Pi already runs: to Pi, the lead is just another intercom session.
 
 ```
-Claude Code (lead) ── mod ── crew-bridge ──┐
-                                           ├── pi-intercom broker (~/.pi/agent/intercom/broker.sock)
-Pi worker (agterm session) ── intercom ────┘
+┌ agterm ───────────────────────────────┐
+│ Claude Code (lead)   Pi worker 1 api  │      pi-intercom broker
+│   mod ─ crew-bridge ──────────────────┼──▶  ~/.pi/agent/intercom/broker.sock
+│                      Pi worker 2 web  │      ▲
+│                        intercom ──────┼──────┘
+└───────────────────────────────────────┘
 ```
-
-## What it adds
-
-| Surface | Use |
-| --- | --- |
-| `mcp__pi-crew__spawn` | Start `pi-work --model <profile>` in a new agterm session after the lead's, with a fixed intercom id and a brief that names the lead. Optional first task. |
-| `mcp__pi-crew__send` | Message a worker by name, or any intercom session by id. `replyTo` answers a message that expects a reply. |
-| `mcp__pi-crew__list` | Live intercom sessions and the crew. |
-| `mcp__pi-crew__stop` | Close a worker's agterm session. |
-| Wake-up | Each worker message starts a new turn in the lead session. |
-| `/crew` | Pane with the roster and the message log. Status line shows live workers. |
-
-## How it works
-
-- One `crew-bridge` process per Claude session holds one intercom identity, derived from the Claude session id. It survives `/reload-plugins` with the same id, so the broker mailbox (24 h, in memory) delivers what arrived meanwhile.
-- A worker gets `PI_INTERCOM_STABLE_ID` derived from the lead session and the worker name, so a respawned worker keeps its address.
-- Workers report with `intercom({ action: "send", to: "<lead id>" })`, never `ask`: a Pi `ask` waits for a reply the lead sends with `replyTo`, which works, but `send` keeps workers from blocking.
-- The bridge imports the client from Pi's own pi-intercom install, so the wire protocol always matches the running broker. No dependencies are vendored.
-- Crew state lives in `~/.pi-crew/<session>/` (workers list, briefs, launch scripts, control socket, mode 0700/0600).
-
-## Requirements
-
-- Claude Code with mods (function hooks), running inside agterm.
-- Pi with the pi-intercom extension installed under `~/.pi/agent` (or `PI_CODING_AGENT_DIR`), and its bundled `tsx`.
-- `pi-work` (or set `PI_CREW_PI_COMMAND`) and `agtermctl` on `PATH`.
 
 ## Install
 
-```
+```sh
 claude plugin marketplace add alexei-led/pi-crew
 claude plugin install pi-crew@pi-crew
 ```
 
-Settings: `PI_CREW_DEFAULT_MODEL` (default `router/openai-work`), `PI_CREW_PI_COMMAND` (default `pi-work`).
+Then `/reload-plugins` or start a new session. Update later with `claude plugin marketplace update pi-crew && claude plugin update pi-crew@pi-crew`.
+
+Requirements:
+
+- Claude Code with mods, running inside agterm (`agtermctl` on `PATH`).
+- Pi with the pi-intercom extension under `~/.pi/agent` (or `PI_CODING_AGENT_DIR`), and its bundled `tsx`.
+- `pi-work` on `PATH` (or set `PI_CREW_PI_COMMAND`).
+
+## Use
+
+Ask Claude in plain words; the bundled skill tells it how to lead:
+
+> spawn two pi workers: `api` in ~/src/app/api to add the /health endpoint, `web` in ~/src/app/web to show it on the status page. Group them as `app`.
+
+Each worker opens in a new agterm session next to Claude's, gets a brief naming its lead, and starts on its task. When it reports, Claude gets a new turn:
+
+```
+◆ Worker 1 api asks; intercom id …; message 7f3c…
+Answer with mcp__pi-crew__send to "api" replyTo "7f3c…".
+
+Should /health check the database too?
+```
+
+Claude answers, reviews finished work (`○ Worker 1 api reports done`), and gives the next task or stops the worker. The transcript keeps the full conversation.
+
+### The band and the pane
+
+The band above the prompt shows the crew at a glance. Click a part to open the pane there:
+
+```
+crew 3 · ◆ 1 needs you · ● 1 · ○ 1 · ✉ 2 new · ? 1 api: Should /health check the database too?
+```
+
+`/crew` opens the pane: who needs you, what each worker is doing, and its latest few messages.
+
+```
+ Inbox ✉2 ◆1   Crew 3
+ [all] ◆ 1  ● 1  ○ 1  ✕ 0
+
+ ◆ 1 api    2m ✉1 Should /health check the database too?
+ ● 2 web   now ✉1 status page wired, tests running
+ ○ 3 docs  40m    README updated
+```
+
+Select a worker for its detail:
+
+```
+ back  ● 2 web · app · working · 12m                    open pane  stop
+ ~/src/app/web · router/openai-work · last now · ✉ 1 new
+
+ latest 3 of 8 · full text in the transcript  more
+ you  3m
+   use the shared Badge component
+ ● web  now
+   status page wired, tests running
+
+ ┌ message 2 web ───────────────────────────────────────────────────┐
+```
+
+| Glyph | State |
+| --- | --- |
+| `◆` | asked a question, waiting for you |
+| `●` | working |
+| `○` | done or idle |
+| `✕` | stopped |
+| `✉` | unread messages |
+
+Keys in the pane: `1` `2` tabs, `a` `q` `w` `i` `x` filters, `b` back, `y` `n` quick answers, `e` more messages, `o` open the worker's agterm session, `s` stop (press twice). Type in the box at the bottom to message the worker; Claude hears about it with the worker's next report.
+
+## Tools
+
+| Tool | Use |
+| --- | --- |
+| `mcp__pi-crew__spawn` `{name, cwd, task?, group?, model?}` | Start `pi-work` in a new agterm session. `model` defaults to `router/openai-work` (`PI_CREW_DEFAULT_MODEL`). |
+| `mcp__pi-crew__send` `{to, text, replyTo?}` | Message a worker by name, or any session by id. |
+| `mcp__pi-crew__list` | Live intercom sessions and the crew. |
+| `mcp__pi-crew__stop` `{name}` | Close a worker's session. Stop again to forget it. |
+
+## How it works
+
+- One `crew-bridge` process per agterm pane holds the lead's intercom identity. `/reload-plugins`, `/clear` and resume in that pane keep the same id, and reports that arrived meanwhile are replayed.
+- A worker gets a fixed intercom id from the lead and its name, so a respawned worker keeps its address. It starts a question with `Q:` and a finished task with `DONE:`.
+- The bridge loads the client from Pi's own pi-intercom install, so the wire protocol matches the running broker. Nothing is vendored.
+- State lives in `~/.pi-crew/<pane>/` (mode 0700): workers, a short message log, unanswered reports, briefs.
+
+Cleanup is automatic. The pane is for current work, not history:
+
+| What | Kept |
+| --- | --- |
+| Messages per worker | the latest 10, at most 24 h |
+| A stopped worker | 30 min, so its last report stays readable; then it and its messages go |
+| A worker whose agterm session closed | marked stopped within seconds |
+| Another pane's crew directory | removed after 7 days with no change |
 
 ## Limits
 
-- One machine. The broker mailbox is in memory: a broker restart drops queued messages and open asks.
-- A worker's model decides whether it follows the brief; a worker that answers only in its own pane can be nudged with `send`.
-- agterm companion sessions (`--parent`) need a newer agterm app; workers are placed with `--after`.
+- One machine. The broker mailbox is in memory: a broker restart drops queued messages.
+- A worker's model decides whether it follows the brief. Nudge a worker that answers only in its own pane with `send`.
+
+## Develop
+
+```sh
+bin/test                       # bridge and view logic (node --test with Pi's tsx)
+claude plugin test .           # band and pane rendering
+claude plugin validate .
+tsc -p .                       # after the mod has loaded once, for .claude-plugin/types
+```
 
 ## License
 

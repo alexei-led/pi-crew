@@ -7,26 +7,55 @@
 // matches the running broker. serve exits 1 when the broker connection drops; the mod restarts it
 // under the same id and the broker flushes anything queued meanwhile.
 // call exits: 0 ok | 1 usage or request failure | 2 bridge unreachable.
-import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { createConnection, createServer, type Socket } from "node:net";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import {
-  DEFAULT_MODEL, KEY, WORKER_NAME, controlPath, crewDir, intercomPkg, launchScript, parseSessionId, stableId,
-  workerBrief, type Worker,
+  DEFAULT_MODEL, FEED_REPLAY, crewRoot, prune, GROUP_NAME, KEY, WORKER_NAME, appendLine, applyIn, applyOut, classify, controlPath, crewDir,
+  intercomPkg, launchScript, nextNumber, parseSessionId, readLines, stableId, upgrade, workerBrief, type Msg, type Worker,
 } from "./lib.mts";
 
 const run = promisify(execFile);
 const REQUEST_LIMIT = 1 << 20;
 const REQUEST_IDLE_MS = 30_000;
+/** How long a worker that left the broker has to come back before its agterm session is checked. */
+const EXIT_CHECK_MS = Number(process.env.PI_CREW_EXIT_CHECK_MS) || 3_000;
+const PRUNE_EVERY_MS = 5 * 60_000;
+/** A crew directory of another agterm pane with no change for this long is removed at bridge start. */
+const STALE_CREW_MS = 7 * 86_400_000;
+/** The broker forgets an intercom ask after its own timeout (10 min by default); a day bounds our copy. */
+const ASK_KEEP_MS = 86_400_000;
+
+function removeStaleCrews(keep: string) {
+  const root = crewRoot();
+  let names: string[] = [];
+  try {
+    names = readdirSync(root);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (name === keep || !KEY.test(name)) continue;
+    const dir = join(root, name);
+    try {
+      // An append to feed.jsonl leaves the directory's own mtime alone, so take the newest file. A running
+      // bridge touches its directory every prune interval, so it never looks stale.
+      const newest = Math.max(statSync(dir).mtimeMs, ...readdirSync(dir).map(f => statSync(join(dir, f)).mtimeMs));
+      if (Date.now() - newest > STALE_CREW_MS) rmSync(dir, { recursive: true, force: true });
+    } catch {}
+  }
+}
 
 type Request =
   | { op: "list" }
   | { op: "send"; to: string; text: string; replyTo?: string }
-  | { op: "spawn"; name: string; cwd: string; model?: string; task?: string }
+  | { op: "spawn"; name: string; cwd: string; model?: string; task?: string; group?: string }
   | { op: "stop"; name: string }
+  | { op: "read"; name: string }
+  | { op: "focus"; name: string }
   | { op: "ack"; id: string };
 
 type Inbound = {
@@ -35,6 +64,7 @@ type Inbound = {
   id: string;
   replyTo?: string;
   expectsReply: boolean;
+  kind: Msg["kind"];
   text: string;
 };
 
@@ -60,16 +90,49 @@ async function serve(key: string, leadName: string) {
 
   const dir = crewDir(key);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
+  removeStaleCrews(key);
   const workersFile = join(dir, "workers.json");
   const inboxFile = join(dir, "inbox.json");
-  const workers = new Map<string, Worker>(readJson<Worker[]>(workersFile, []).map(w => [w.name, w]));
-  const saveWorkers = () => writeJson(workersFile, [...workers.values()]);
+  const feedFile = join(dir, "feed.jsonl");
+  const workers = new Map<string, Worker>(upgrade(readJson<Partial<Worker>[]>(workersFile, [])).map(w => [w.name, w]));
+  const emit = (event: Record<string, unknown>) => process.stdout.write(`${JSON.stringify(event)}\n`);
+  const saveWorkers = () => {
+    writeJson(workersFile, [...workers.values()]);
+    emit({ type: "workers", workers: [...workers.values()] });
+  };
+  const feedIds = new Set(readLines<Msg>(feedFile).map(m => m.id));
+  const record = (msg: Msg) => {
+    if (feedIds.has(msg.id)) return false;
+    feedIds.add(msg.id);
+    appendLine(feedFile, msg);
+    emit({ type: "feed", msg });
+    return true;
+  };
+  // Drops stopped workers past their grace time with their messages, anything older than a day, and all but
+  // each worker's latest few.
+  const pruneNow = () => {
+    const feed = readLines<Msg>(feedFile);
+    const kept = prune([...workers.values()], feed, Date.now());
+    if (kept.forgotten.length === 0 && kept.feed.length === feed.length) return;
+    for (const name of kept.forgotten) workers.delete(name);
+    const tmp = `${feedFile}.tmp`;
+    writeFileSync(tmp, kept.feed.map(m => `${JSON.stringify(m)}\n`).join(""), { mode: 0o600 });
+    renameSync(tmp, feedFile);
+    if (kept.forgotten.length) saveWorkers();
+    emit({ type: "feedset", feed: kept.feed.slice(-FEED_REPLAY) });
+  };
   // Reports the lead has not yet taken in. Kept on disk so a bridge restart or mod reload replays them.
   const inbox = new Map<string, Inbound>(readJson<Inbound[]>(inboxFile, []).map(m => [m.id, m]));
   const saveInbox = () => writeJson(inboxFile, [...inbox.values()]);
+  // Intercom asks still awaiting an answer (id -> arrival): the broker accepts replyTo only for these. On disk, so
+  // a bridge restart can still answer a worker blocked on one.
+  const asksFile = join(dir, "asks.json");
+  const pendingAsks = new Map<string, number>(
+    Object.entries(readJson<Record<string, number>>(asksFile, {})).filter(([, at]) => Date.now() - at < ASK_KEEP_MS),
+  );
+  const saveAsks = () => writeJson(asksFile, Object.fromEntries(pendingAsks));
   const workerName = (id: string) => [...workers.values()].find(w => w.id === id)?.name;
 
-  const emit = (event: Record<string, unknown>) => process.stdout.write(`${JSON.stringify(event)}\n`);
   const lead = { name: leadName, id: stableId("pi-crew-lead", key) };
   const client = new IntercomClient();
 
@@ -97,24 +160,43 @@ async function serve(key: string, leadName: string) {
   client.on("message", (from: { id: string; name?: string; cwd: string }, message: {
     id: string; replyTo?: string; expectsReply?: boolean; content: { text: string };
   }) => {
-    if (!inbox.has(message.id)) {
+    if (!inbox.has(message.id) && !feedIds.has(message.id)) {
+      const worker = workerName(from.id);
+      const { kind, text } = classify(message.content.text, message.expectsReply === true);
       const event: Inbound = {
         type: "message",
-        from: { id: from.id, name: from.name, cwd: from.cwd, worker: workerName(from.id) },
+        from: { id: from.id, name: from.name, cwd: from.cwd, worker },
         id: message.id,
         ...(message.replyTo ? { replyTo: message.replyTo } : {}),
         expectsReply: message.expectsReply === true,
+        kind,
         text: message.content.text,
       };
       inbox.set(message.id, event);
       saveInbox();
+      if (event.expectsReply) {
+        pendingAsks.set(message.id, Date.now());
+        saveAsks();
+      }
+      const msg: Msg = {
+        id: message.id, at: Date.now(), kind, text, peer: worker ?? from.name ?? from.id,
+        ...(worker ? { worker } : {}), ...(message.replyTo ? { replyTo: message.replyTo } : {}),
+      };
+      record(msg);
+      const w = worker ? workers.get(worker) : undefined;
+      if (w) {
+        workers.set(w.name, applyIn(w, msg));
+        saveWorkers();
+      }
       emit(event);
     }
     // Stored on disk: tell the sender it arrived. A crash before this makes the sender see a retryable failure.
     client.sendMessageReceipt({ messageId: message.id, status: "receiver_received", timestamp: Date.now() });
   });
-  client.onBrokerMessage((m: { type: string }) => {
+  client.onBrokerMessage((m: { type: string; sessionId?: string }) => {
     if (m.type === "session_joined" || m.type === "session_left" || m.type === "presence_update") publishRoster();
+    const w = m.type === "session_left" ? [...workers.values()].find(x => x.id === m.sessionId) : undefined;
+    if (w && w.state !== "gone") setTimeout(() => void checkExited(w.name), EXIT_CHECK_MS).unref();
   });
   client.on("error", (error: unknown) => emit({ type: "error", error: String(error) }));
 
@@ -129,6 +211,29 @@ async function serve(key: string, leadName: string) {
   );
 
   const agterm = async (args: string[]) => (await run("agtermctl", args, { timeout: 15_000 })).stdout;
+  const errorText = (error: unknown) => `${(error as { stdout?: string }).stdout ?? ""} ${error instanceof Error ? error.message : String(error)}`;
+  const sessionClosed = async (id?: string) => {
+    if (!id) return false;
+    try {
+      await agterm(["session", "text", "--target", id]);
+      return false;
+    } catch (error) {
+      return /no such session/i.test(errorText(error));
+    }
+  };
+  // A worker left the broker: if it did not come back and its agterm session is closed, it finished and exited.
+  const checkExited = async (name: string) => {
+    const w = workers.get(name);
+    if (!w || w.state === "gone") return;
+    const live = await client.listSessions().catch(() => []);
+    if (live.some((x: { id: string }) => x.id === w.id) || !(await sessionClosed(w.agtermSession))) return;
+    const cur = workers.get(name);
+    // A stop and respawn under the same name during the awaits is a new worker: leave it alone.
+    if (!cur || cur.state === "gone" || cur.agtermSession !== w.agtermSession || cur.startedAt !== w.startedAt) return;
+    workers.set(name, { ...cur, state: "gone", agtermSession: undefined, ask: undefined, lastAt: Date.now() });
+    saveWorkers();
+    publishRoster();
+  };
   const spawning = new Set<string>();
 
   const handle = async (req: Request): Promise<object> => {
@@ -139,25 +244,68 @@ async function serve(key: string, leadName: string) {
         if (inbox.delete(req.id)) saveInbox();
         return { acked: req.id };
       case "send": {
-        const target = workers.get(req.to)?.id ?? req.to;
-        const result = await client.send(target, { text: req.text, ...(req.replyTo ? { replyTo: req.replyTo } : {}) });
+        const w = workers.get(req.to);
+        const target = w?.id ?? req.to;
+        // A reply to a Q: report or any plain message is threaded locally only.
+        const askReply = req.replyTo && pendingAsks.has(req.replyTo) ? req.replyTo : undefined;
+        let result = await client.send(target, { text: req.text, ...(askReply ? { replyTo: askReply } : {}) });
+        // The broker dropped the ask (its timeout, or the worker gave up waiting): deliver as a plain message.
+        if (askReply && result.code === "E_REPLY_TARGET") result = await client.send(target, { text: req.text });
+        if (askReply && (result.delivered || result.code === "E_REPLY_TARGET")) {
+          pendingAsks.delete(askReply);
+          saveAsks();
+        }
         if (!result.delivered) throw new Error(`not delivered to ${req.to}: ${result.reason ?? "unknown"}${result.code ? ` (${result.code})` : ""}`);
+        const msg: Msg = {
+          id: result.id ?? `out-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, at: Date.now(), kind: "out",
+          text: req.text, peer: w?.name ?? req.to, ...(w ? { worker: w.name } : {}), ...(req.replyTo ? { replyTo: req.replyTo } : {}),
+        };
+        record(msg);
+        if (w) {
+          workers.set(w.name, applyOut(w, msg));
+          saveWorkers();
+        }
         return { ...result, to: target };
+      }
+      case "read": {
+        const w = workers.get(req.name);
+        if (!w) throw new Error(`no worker named ${req.name}`);
+        if (w.unread) {
+          workers.set(w.name, { ...w, unread: 0 });
+          saveWorkers();
+        }
+        return { read: req.name };
+      }
+      case "focus": {
+        const w = workers.get(req.name);
+        if (!w?.agtermSession) throw new Error(`worker ${req.name} has no open session`);
+        await agterm(["session", "select", "--target", w.agtermSession]);
+        return { focused: req.name };
       }
       case "spawn": {
         if (!WORKER_NAME.test(req.name)) throw new Error(`worker name must match ${WORKER_NAME}`);
-        if (spawning.has(req.name) || workers.get(req.name)?.agtermSession) {
+        if (req.group && !GROUP_NAME.test(req.group)) throw new Error(`group must match ${GROUP_NAME}`);
+        const old = workers.get(req.name);
+        if (spawning.has(req.name) || (old && old.state !== "gone")) {
           throw new Error(`worker ${req.name} already exists; stop it first`);
         }
         const parent = process.env.AGTERM_SESSION_ID;
         if (!parent) throw new Error("not running inside agterm (AGTERM_SESSION_ID unset)");
         spawning.add(req.name);
         try {
+          const now = Date.now();
           const worker: Worker = {
             name: req.name,
             id: stableId("pi-crew-worker", key, req.name),
             cwd: req.cwd,
             model: req.model || process.env.PI_CREW_DEFAULT_MODEL || DEFAULT_MODEL,
+            n: nextNumber(workers.values()),
+            ...(req.group ? { group: req.group } : {}),
+            state: req.task ? "work" : "idle",
+            unread: 0,
+            startedAt: now,
+            lastAt: now,
+            ...(req.task ? { last: { id: `task-${now}`, at: now, text: `you: ${req.task.slice(0, 299)}` } } : {}),
           };
           const wdir = join(dir, "workers", worker.name);
           mkdirSync(wdir, { recursive: true, mode: 0o700 });
@@ -169,15 +317,26 @@ async function serve(key: string, leadName: string) {
           // Recorded before agterm runs, so its id resolves for sends even while the session starts.
           workers.set(worker.name, worker);
           saveWorkers();
-          const out = await agterm([
-            "session", "new", "--after", parent, "--no-select", "--cwd", worker.cwd,
-            "--name", worker.name, "--command", launch, "--wait", "--json",
-          ]);
-          worker.agtermSession = parseSessionId(out);
+          if (req.task) record({ id: `task-${now}-${worker.name}`, at: now, kind: "out", text: req.task, peer: worker.name, worker: worker.name });
+          let session: string | undefined;
+          let failure = "";
+          try {
+            const out = await agterm([
+              "session", "new", "--after", parent, "--no-select", "--cwd", worker.cwd,
+              "--name", worker.name, "--command", launch, "--wait", "--json",
+            ]);
+            session = parseSessionId(out);
+            if (!session) failure = `agtermctl returned no session id: ${out.trim().slice(0, 200)}`;
+          } catch (error) {
+            failure = `agtermctl session new failed: ${error instanceof Error ? error.message : String(error)}`;
+          }
+          // A report may have updated the record while agterm ran: merge into the current one.
+          const current = workers.get(worker.name) ?? worker;
+          workers.set(worker.name, session ? { ...current, agtermSession: session } : { ...current, state: "gone" });
           saveWorkers();
-          if (!worker.agtermSession) throw new Error(`agtermctl returned no session id: ${out.trim().slice(0, 200)}`);
+          if (!session) throw new Error(failure);
           publishRoster();
-          return { worker };
+          return { worker: workers.get(worker.name) };
         } finally {
           spawning.delete(req.name);
         }
@@ -185,16 +344,23 @@ async function serve(key: string, leadName: string) {
       case "stop": {
         const worker = workers.get(req.name);
         if (!worker) throw new Error(`no worker named ${req.name}`);
+        // A second stop forgets a stopped worker.
+        if (worker.state === "gone") {
+          workers.delete(req.name);
+          saveWorkers();
+          pruneNow();
+          return { forgot: req.name };
+        }
         if (worker.agtermSession) {
           try {
             await agterm(["session", "close", "--target", worker.agtermSession]);
           } catch (error) {
-            const detail = `${(error as { stdout?: string }).stdout ?? ""} ${error instanceof Error ? error.message : String(error)}`;
+            const detail = errorText(error);
             // A session the user already closed is gone; anything else keeps the record for a retry.
             if (!/no such session/i.test(detail)) throw new Error(`close failed: ${detail.trim()}`);
           }
         }
-        workers.delete(req.name);
+        workers.set(req.name, { ...worker, state: "gone", agtermSession: undefined, ask: undefined, lastAt: Date.now() });
         saveWorkers();
         publishRoster();
         return { stopped: req.name };
@@ -243,7 +409,18 @@ async function serve(key: string, leadName: string) {
     void shutdown(1);
   });
   // No stdin watch: a mod-spawned child starts with stdin closed; the engine kills it on unload.
-  emit({ type: "ready", lead, agtermSession: process.env.AGTERM_SESSION_ID ?? null, workers: [...workers.values()] });
+  pruneNow();
+  setInterval(() => {
+    pruneNow();
+    try {
+      const now = new Date();
+      utimesSync(dir, now, now);
+    } catch {}
+  }, PRUNE_EVERY_MS).unref();
+  emit({
+    type: "ready", lead, agtermSession: process.env.AGTERM_SESSION_ID ?? null,
+    workers: [...workers.values()], feed: readLines<Msg>(feedFile, FEED_REPLAY),
+  });
   for (const pending of inbox.values()) emit(pending);
   publishRoster();
 }
