@@ -18,6 +18,8 @@ export type CrewWorker = {
   lastAt: number
   last?: CrewPreview
   ask?: CrewPreview
+  /** When the bridge last told the lead this worker sits idle. */
+  alertedAt?: number
 }
 
 /** One feed message (bridge/lib.mts `Msg`). `worker` is unset for a session the lead did not spawn. */

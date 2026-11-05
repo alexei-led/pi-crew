@@ -4,6 +4,8 @@ import type { CrewFilter, CrewMsg, CrewState, CrewWorker } from '../types'
 export const GLYPH: Record<CrewState, string> = { ask: '◆', work: '●', idle: '○', gone: '✕' }
 export const COLOR: Record<CrewState, string | undefined> = { ask: 'yellow', work: 'green', idle: undefined, gone: 'gray' }
 export const UNREAD = '✉'
+/** The bridge's alert that a working worker went quiet: not a worker state, so not in GLYPH. */
+export const IDLE_GLYPH = '◇'
 export const LABEL: Record<CrewState, string> = { ask: 'needs you', work: 'working', idle: 'idle', gone: 'stopped' }
 
 /** "3 api": the number and name every surface shows for a worker. */
@@ -86,9 +88,18 @@ export function clampText(text: string, lines: number, width: number): { text: s
   return { text: out.join('\n'), more: false }
 }
 
+/** The line a DONE turn carries: what the bridge found checking the report's claims against git. */
+export function checksLine(checks: { ok: boolean; notes: string[] } | undefined): string {
+  if (!checks) return ''
+  return checks.ok
+    ? 'DONE checks passed: fields present, HEAD and branch as claimed, tree clean. Still review the work itself.'
+    : `DONE checks failed: ${checks.notes.join('; ')}. Treat the report as unverified.`
+}
+
 /** The sentence a worker message becomes as a turn: same glyph, number and name as the band and pane. */
-export function turnHead(w: CrewWorker | undefined, kind: CrewMsg['kind'], peer: string): string {
+export function turnHead(w: CrewWorker | undefined, kind: CrewMsg['kind'] | 'idle', peer: string): string {
   if (!w) return `Message from intercom session "${peer}" (not a crew worker)`
+  if (kind === 'idle') return `${IDLE_GLYPH} Worker ${tag(w)} is idle without a report`
   const verb = kind === 'ask' ? 'asks' : kind === 'done' ? 'reports done' : 'reports'
   return `${kind === 'ask' ? GLYPH.ask : kind === 'done' ? GLYPH.idle : GLYPH.work} Worker ${tag(w)} ${verb}`
 }

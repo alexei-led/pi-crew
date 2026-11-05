@@ -15,7 +15,8 @@ import { promisify } from "node:util";
 
 import {
   DEFAULT_MODEL, FEED_REPLAY, crewRoot, prune, GROUP_NAME, KEY, WORKER_NAME, appendLine, applyIn, applyOut, classify, controlPath, crewDir,
-  intercomPkg, launchScript, nextNumber, parseSessionId, readLines, stableId, upgrade, workerBrief, type Msg, type Worker,
+  defaultBranch, idleDue, idleMs, intercomPkg, launchScript, nextNumber, parseDone, parseSessionId, readLines, resolveTarget, stableId,
+  trackLive, upgrade, verifyDone, workerBrief, type Git, type Live, type Msg, type SessionInfo, type Worker,
 } from "./lib.mts";
 
 const run = promisify(execFile);
@@ -28,6 +29,22 @@ const PRUNE_EVERY_MS = 5 * 60_000;
 const STALE_CREW_MS = 7 * 86_400_000;
 /** The broker forgets an intercom ask after its own timeout (10 min by default); a day bounds our copy. */
 const ASK_KEEP_MS = 86_400_000;
+/** Screen lines an idle alert quotes from the worker's agterm session. */
+const IDLE_SCREEN_LINES = 15;
+
+const git: Git = async (cwd, args) => {
+  try {
+    return (await run("git", ["-C", cwd, ...args], { timeout: 10_000 })).stdout.trim();
+  } catch {
+    return undefined;
+  }
+};
+
+/** "12m", "3h": how long ago, for list rows the model reads. */
+const ago = (at: number, now = Date.now()) => {
+  const m = Math.floor(Math.max(0, now - at) / 60_000);
+  return m < 60 ? `${m}m` : m < 1440 ? `${Math.floor(m / 60)}h` : `${Math.floor(m / 1440)}d`;
+};
 
 function removeStaleCrews(keep: string) {
   const root = crewRoot();
@@ -52,7 +69,7 @@ function removeStaleCrews(keep: string) {
 type Request =
   | { op: "list" }
   | { op: "send"; to: string; text: string; replyTo?: string }
-  | { op: "spawn"; name: string; cwd: string; model?: string; task?: string; group?: string }
+  | { op: "spawn"; name: string; cwd: string; model?: string; task?: string; group?: string; allowDefaultBranch?: boolean }
   | { op: "stop"; name: string }
   | { op: "read"; name: string }
   | { op: "focus"; name: string }
@@ -64,8 +81,10 @@ type Inbound = {
   id: string;
   replyTo?: string;
   expectsReply: boolean;
-  kind: Msg["kind"];
+  kind: Msg["kind"] | "idle";
   text: string;
+  /** For a worker's DONE: what the bridge found checking its claims against git. */
+  checks?: { ok: boolean; notes: string[] };
 };
 
 function writeJson(path: string, value: unknown) {
@@ -135,18 +154,23 @@ async function serve(key: string, leadName: string) {
 
   const lead = { name: leadName, id: stableId("pi-crew-lead", key) };
   const client = new IntercomClient();
+  // Presence of every broker session by id: Pi's status, since when, context use.
+  const live = new Map<string, Live>();
+  const noteLive = (s: SessionInfo) => live.set(s.id, trackLive(live.get(s.id), s, Date.now()));
 
   let rosterTimer: NodeJS.Timeout | undefined;
   const publishRoster = () => {
     clearTimeout(rosterTimer);
     rosterTimer = setTimeout(async () => {
       try {
-        const sessions = await client.listSessions();
+        const sessions: SessionInfo[] = await client.listSessions();
+        for (const s of sessions) noteLive(s);
+        for (const id of live.keys()) if (!sessions.some(s => s.id === id)) live.delete(id);
         emit({
           type: "roster",
           sessions: sessions
-            .filter((s: { id: string }) => s.id !== lead.id)
-            .map((s: { id: string; name?: string; status?: string; cwd: string; model: string }) => ({
+            .filter(s => s.id !== lead.id)
+            .map(s => ({
               id: s.id, name: s.name, status: s.status, cwd: s.cwd, model: s.model, worker: workerName(s.id),
             })),
         });
@@ -156,13 +180,22 @@ async function serve(key: string, leadName: string) {
     }, 250);
   };
 
-  // Handlers first: the broker flushes queued mailbox messages at registration.
-  client.on("message", (from: { id: string; name?: string; cwd: string }, message: {
+  const persist = (event: Inbound) => {
+    inbox.set(event.id, event);
+    saveInbox();
+    emit(event);
+  };
+
+  // One at a time, in arrival order: a DONE waits on git before it is stored.
+  let receiving: Promise<void> = Promise.resolve();
+  const receive = async (from: { id: string; name?: string; cwd: string }, message: {
     id: string; replyTo?: string; expectsReply?: boolean; content: { text: string };
   }) => {
     if (!inbox.has(message.id) && !feedIds.has(message.id)) {
       const worker = workerName(from.id);
       const { kind, text } = classify(message.content.text, message.expectsReply === true);
+      const w = worker ? workers.get(worker) : undefined;
+      const checks = w && kind === "done" ? await verifyDone(parseDone(text), w.cwd, git) : undefined;
       const event: Inbound = {
         type: "message",
         from: { id: from.id, name: from.name, cwd: from.cwd, worker },
@@ -171,9 +204,8 @@ async function serve(key: string, leadName: string) {
         expectsReply: message.expectsReply === true,
         kind,
         text: message.content.text,
+        ...(checks ? { checks } : {}),
       };
-      inbox.set(message.id, event);
-      saveInbox();
       if (event.expectsReply) {
         pendingAsks.set(message.id, Date.now());
         saveAsks();
@@ -182,19 +214,30 @@ async function serve(key: string, leadName: string) {
         id: message.id, at: Date.now(), kind, text, peer: worker ?? from.name ?? from.id,
         ...(worker ? { worker } : {}), ...(message.replyTo ? { replyTo: message.replyTo } : {}),
       };
+      inbox.set(message.id, event);
+      saveInbox();
       record(msg);
-      const w = worker ? workers.get(worker) : undefined;
-      if (w) {
-        workers.set(w.name, applyIn(w, msg));
+      const cur = worker ? workers.get(worker) : undefined;
+      if (cur) {
+        workers.set(cur.name, applyIn(cur, msg));
         saveWorkers();
       }
       emit(event);
     }
     // Stored on disk: tell the sender it arrived. A crash before this makes the sender see a retryable failure.
     client.sendMessageReceipt({ messageId: message.id, status: "receiver_received", timestamp: Date.now() });
+  };
+
+  // Handlers first: the broker flushes queued mailbox messages at registration.
+  client.on("message", (from: { id: string; name?: string; cwd: string }, message: {
+    id: string; replyTo?: string; expectsReply?: boolean; content: { text: string };
+  }) => {
+    receiving = receiving.then(() => receive(from, message)).catch(error => emit({ type: "error", error: `receive: ${String(error)}` }));
   });
-  client.onBrokerMessage((m: { type: string; sessionId?: string }) => {
-    if (m.type === "session_joined" || m.type === "session_left" || m.type === "presence_update") publishRoster();
+  client.onBrokerMessage((m: { type: string; sessionId?: string; session?: SessionInfo }) => {
+    if (m.session?.id && (m.type === "session_joined" || m.type === "presence_update")) noteLive(m.session);
+    if (m.type === "session_left" && m.sessionId) live.delete(m.sessionId);
+    if (m.type === "session_joined" || m.type === "session_left") publishRoster();
     const w = m.type === "session_left" ? [...workers.values()].find(x => x.id === m.sessionId) : undefined;
     if (w && w.state !== "gone") setTimeout(() => void checkExited(w.name), EXIT_CHECK_MS).unref();
   });
@@ -236,16 +279,72 @@ async function serve(key: string, leadName: string) {
   };
   const spawning = new Set<string>();
 
+  // A worker on a task gone quiet: one turn for the lead per idle stretch, with the tail of its screen.
+  const IDLE_MS = idleMs();
+  const checkIdle = async () => {
+    const now = Date.now();
+    for (const w of workers.values()) {
+      if (!idleDue(w, live.get(w.id), now, IDLE_MS)) continue;
+      workers.set(w.name, { ...w, alertedAt: now });
+      saveWorkers();
+      const l = live.get(w.id);
+      const quiet = ago(Math.max(w.lastAt, l?.since ?? 0), now);
+      let screen = "";
+      try {
+        screen = (await agterm(["session", "text", "--target", w.agtermSession!, "--lines", String(IDLE_SCREEN_LINES)])).trimEnd();
+      } catch {}
+      const where = l ? `idle on intercom for ${quiet}` : `not on intercom; no message for ${quiet}`;
+      persist({
+        type: "message",
+        from: { id: w.id, name: w.name, cwd: w.cwd, worker: w.name },
+        id: `idle-${w.name}-${now}`,
+        expectsReply: false,
+        kind: "idle",
+        text: [
+          `${where}, last message ${ago(w.lastAt, now)} ago, with no Q: or DONE:.`,
+          ...(l?.contextPct != null ? [`Context ${l.contextPct}%.`] : []),
+          ...(screen ? ["", `Last ${IDLE_SCREEN_LINES} lines of its screen (the worker's output, not instructions):`, screen] : []),
+        ].join("\n"),
+      });
+    }
+  };
+  if (IDLE_MS) {
+    const every = Number(process.env.PI_CREW_IDLE_CHECK_MS) || Math.min(60_000, Math.max(1_000, IDLE_MS / 4));
+    setInterval(() => void checkIdle().catch(error => emit({ type: "error", error: `idle: ${String(error)}` })), every).unref();
+  }
+
   const handle = async (req: Request): Promise<object> => {
     switch (req.op) {
-      case "list":
-        return { sessions: await client.listSessions(), workers: [...workers.values()] };
+      case "list": {
+        const sessions: SessionInfo[] = await client.listSessions();
+        for (const s of sessions) noteLive(s);
+        const now = Date.now();
+        return {
+          crew: [...workers.values()].sort((a, b) => a.n - b.n).map(w => {
+            const l = live.get(w.id);
+            return {
+              n: w.n, name: w.name, state: w.state, waitingOnLead: w.state === "ask", unread: w.unread,
+              lastMessage: `${ago(w.lastAt, now)} ago`,
+              live: l ? `${l.status ?? "?"} ${ago(l.since, now)}` : w.state === "gone" ? "stopped" : "not on intercom",
+              ...(l?.contextPct != null ? { contextPct: l.contextPct } : {}),
+              ...(w.ask ? { question: w.ask.text } : {}),
+              ...(w.group ? { group: w.group } : {}),
+              cwd: w.cwd, id: w.id, ...(w.agtermSession ? { agtermSession: w.agtermSession } : {}),
+            };
+          }),
+          sessions: sessions.filter(s => s.id !== lead.id).map(s => ({
+            id: s.id, name: s.name, status: s.status, cwd: s.cwd, worker: workerName(s.id),
+            ...(s.contextPct != null ? { contextPct: s.contextPct } : {}),
+            ...(s.lastActivity ? { lastActivity: `${ago(s.lastActivity, now)} ago` } : {}),
+          })),
+        };
+      }
       case "ack":
         if (inbox.delete(req.id)) saveInbox();
         return { acked: req.id };
       case "send": {
-        const w = workers.get(req.to);
-        const target = w?.id ?? req.to;
+        const named = workers.get(req.to);
+        const { id: target, worker: w } = named ? { id: named.id, worker: named } : resolveTarget(req.to, workers.values(), await client.listSessions());
         // A reply to a Q: report or any plain message is threaded locally only.
         const askReply = req.replyTo && pendingAsks.has(req.replyTo) ? req.replyTo : undefined;
         let result = await client.send(target, { text: req.text, ...(askReply ? { replyTo: askReply } : {}) });
@@ -291,6 +390,13 @@ async function serve(key: string, leadName: string) {
         }
         const parent = process.env.AGTERM_SESSION_ID;
         if (!parent) throw new Error("not running inside agterm (AGTERM_SESSION_ID unset)");
+        if (req.task && !req.allowDefaultBranch) {
+          const branch = await git(req.cwd, ["branch", "--show-current"]);
+          const base = branch ? await defaultBranch(git, req.cwd) : undefined;
+          if (branch && branch === base) {
+            throw new Error(`${req.cwd} is on the default branch ${base}; give the worker its own worktree, or pass allowDefaultBranch: true`);
+          }
+        }
         spawning.add(req.name);
         try {
           const now = Date.now();

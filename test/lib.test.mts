@@ -6,8 +6,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import {
-  WORKER_NAME, appendLine, prune, applyIn, applyOut, classify, launchScript, nextNumber, parseSessionId, readLines, stableId, upgrade,
-  workerBrief, type Msg, type Worker,
+  WORKER_NAME, appendLine, prune, applyIn, applyOut, classify, defaultBranch, idleDue, idleMs, launchScript, nextNumber, parseDone,
+  parseSessionId, readLines, resolveTarget, stableId, trackLive, upgrade, verifyDone, workerBrief, type Git, type Msg, type Worker,
 } from "../bridge/lib.mts";
 
 const base: Worker = { name: "api", id: "w", cwd: "/x", model: "m", n: 1, state: "work", unread: 0, startedAt: 0, lastAt: 0 };
@@ -31,6 +31,8 @@ test("workerBrief names the lead id and carries the task", () => {
   const brief = workerBrief({ name: "lead", id: "LEAD-ID" }, worker, "do the thing");
   assert.match(brief, /to: "LEAD-ID"/);
   assert.match(brief, /First task:\ndo the thing$/);
+  assert.match(brief, /working directory is \/x\. Run every command there/);
+  for (const field of ["head", "branch", "tests", "rc", "logs"]) assert.match(brief, new RegExp(`^ +${field}: <`, "m"), field);
   assert.match(workerBrief({ name: "lead", id: "L" }, worker), /send the lead one line "ready"/);
 });
 
@@ -126,4 +128,123 @@ test("prune keeps each worker's newest messages and gives strangers one shared b
   const m = (id: string, worker?: string): Msg => ({ id, at: 0, kind: "report", text: id, peer: worker ?? id, ...(worker ? { worker } : {}) });
   const feed = [m("a1", "a"), m("b1", "b"), m("a2", "a"), m("x1"), m("a3", "a"), m("x2"), m("x3")];
   assert.deepEqual(prune(ws, feed, 0, 1, 1, 2).feed.map(x => x.id), ["b1", "a2", "a3", "x2", "x3"]);
+});
+
+test("idleMs reads PI_CREW_IDLE_MIN; 0, junk and negatives turn the alert off", () => {
+  const cases: Array<[string | undefined, number]> = [[undefined, 600_000], ["", 600_000], ["2", 120_000], ["0.5", 30_000], ["0", 0], ["-1", 0], ["soon", 0]];
+  for (const [raw, ms] of cases) assert.equal(idleMs({ PI_CREW_IDLE_MIN: raw }), ms, String(raw));
+});
+
+test("trackLive moves `since` only when a session turns idle or busy", () => {
+  const a = trackLive(undefined, { status: "thinking" }, 1);
+  const b = trackLive(a, { status: "tool:bash", contextPct: 40 }, 2);
+  const c = trackLive(b, { status: "idle · waiting on CI" }, 3);
+  const d = trackLive(c, { status: "idle" }, 4);
+  assert.deepEqual([a.since, b.since, c.since, d.since], [1, 1, 3, 3]);
+  assert.equal(b.contextPct, 40);
+});
+
+test("idleDue: a working worker quiet past the threshold, once per idle stretch", () => {
+  const ms = 1000;
+  const w: Worker = { ...base, agtermSession: "s", lastAt: 0 };
+  const idle = { status: "idle", since: 0 };
+  const cases: Array<[string, Worker, Parameters<typeof idleDue>[1], number, boolean]> = [
+    ["idle past threshold", w, idle, 1000, true],
+    ["idle, not yet", w, idle, 999, false],
+    ["busy", w, { status: "thinking", since: 0 }, 5000, false],
+    ["off the broker", w, undefined, 1000, true],
+    ["waiting on the lead", { ...w, state: "ask" }, idle, 5000, false],
+    ["done", { ...w, state: "idle" }, idle, 5000, false],
+    ["no agterm session", { ...w, agtermSession: undefined }, idle, 5000, false],
+    ["already alerted this stretch", { ...w, alertedAt: 1000 }, idle, 5000, false],
+    ["new message after the alert", { ...w, alertedAt: 1000, lastAt: 2000 }, idle, 3000, true],
+    ["went idle again after the alert", { ...w, alertedAt: 1000 }, { status: "idle", since: 2000 }, 3000, true],
+  ];
+  for (const [what, worker, live, now, due] of cases) assert.equal(idleDue(worker, live, now, ms), due, what);
+  assert.equal(idleDue(w, idle, 1e9, 0), false, "disabled");
+});
+
+test("resolveTarget: worker, exact id, session name in any case, unique id prefix; ambiguity and misses fail with candidates", () => {
+  const api: Worker = { ...base, id: "11111111-aaaa-4aaa-8aaa-000000000001" };
+  const sessions = [
+    { id: "22222222-bbbb-4bbb-8bbb-000000000002", name: "CI-Agent" },
+    { id: "33333333-cccc-4ccc-8ccc-000000000003", name: "twin" },
+    { id: "33333333-dddd-4ddd-8ddd-000000000004", name: "twin" },
+  ];
+  assert.deepEqual(resolveTarget("api", [api], sessions), { id: api.id, worker: api });
+  assert.equal(resolveTarget(sessions[0]!.id, [api], sessions).id, sessions[0]!.id);
+  assert.equal(resolveTarget("ci-agent", [api], sessions).id, sessions[0]!.id);
+  assert.equal(resolveTarget("222222", [api], sessions).id, sessions[0]!.id);
+  const offline = "44444444-eeee-4eee-8eee-000000000005";
+  assert.equal(resolveTarget(offline, [api], sessions).id, offline, "a full id passes through for the broker to queue");
+  assert.throws(() => resolveTarget("twin", [api], sessions), /names 2 sessions: twin \(33333333-cccc.*twin \(33333333-dddd/);
+  assert.throws(() => resolveTarget("333333", [api], sessions), /prefix of 2 ids/);
+  assert.throws(() => resolveTarget("22222", [api], sessions), /no worker or session named "22222"/, "short prefixes do not match");
+  assert.throws(() => resolveTarget("nobody", [api], sessions), /no worker or session named "nobody"; live: CI-Agent \(/);
+  assert.throws(() => resolveTarget("nobody", [], []), /live: none/);
+});
+
+test("parseDone reads the report fields; the first of each wins", () => {
+  const text = [
+    "fixed verify.sh", "", "head: `abc1234def`", "- branch: feat/x,", "tests: bin/test --filter verify", "rc=0",
+    "logs: /tmp/a.log /tmp/b.log", "head: ffff",
+  ].join("\n");
+  assert.deepEqual(parseDone(text), { head: "abc1234def", branch: "feat/x", tests: "bin/test --filter verify", rc: "0", logs: "/tmp/a.log /tmp/b.log" });
+  assert.deepEqual(parseDone("all good"), {});
+});
+
+const sh = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
+const realGit: Git = async (cwd, args) => {
+  try {
+    return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  } catch {
+    return undefined;
+  }
+};
+function repo() {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "pi-crew-git-")));
+  const main = join(dir, "main");
+  execFileSync("git", ["init", "-q", "-b", "main", main]);
+  for (const [k, v] of [["user.email", "t@t"], ["user.name", "t"], ["commit.gpgsign", "false"]]) sh(main, "config", k!, v!);
+  writeFileSync(join(main, "a.txt"), "a\n");
+  sh(main, "add", ".");
+  sh(main, "commit", "-qm", "init");
+  const wt = join(dir, "wt");
+  sh(main, "worktree", "add", "-q", "-b", "feat/x", wt);
+  return { main, wt, head: sh(wt, "rev-parse", "HEAD") };
+}
+
+test("defaultBranch: origin HEAD, else main or master", async () => {
+  const { main, wt } = repo();
+  assert.equal(await defaultBranch(realGit, wt), "main");
+  sh(main, "update-ref", "refs/remotes/origin/trunk", "HEAD");
+  sh(main, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk");
+  assert.equal(await defaultBranch(realGit, wt), "trunk");
+  assert.equal(await defaultBranch(realGit, mkdtempSync(join(tmpdir(), "pi-crew-nogit-"))), undefined);
+});
+
+test("verifyDone checks the claims against the checkout", async () => {
+  const { main, wt, head } = repo();
+  const good = { head, branch: "feat/x", tests: "bin/test", rc: "0", logs: "none" };
+  assert.deepEqual(await verifyDone(good, wt, realGit), { ok: true, notes: [] });
+  assert.deepEqual(await verifyDone({ ...good, head: head.slice(0, 7) }, wt, realGit), { ok: true, notes: [] }, "a short sha is enough");
+
+  const bad = await verifyDone({ head: "abc", branch: "feat/y", rc: "1" }, wt, realGit);
+  assert.deepEqual(bad.notes, [
+    "missing tests, logs",
+    "reported rc=1",
+    `head abc is not HEAD ${head.slice(0, 12)}`,
+    "branch feat/y is not the checked-out feat/x",
+  ]);
+
+  writeFileSync(join(wt, "b.txt"), "b\n");
+  writeFileSync(join(main, "a.txt"), "escaped\n");
+  assert.deepEqual((await verifyDone(good, wt, realGit)).notes, [
+    `uncommitted changes in ${wt}: 1 path(s)`,
+    `main checkout ${main} has uncommitted changes`,
+  ]);
+  assert.deepEqual((await verifyDone({ ...good, branch: "main" }, main, realGit)).notes, ["on the default branch main", `uncommitted changes in ${main}: 1 path(s)`]);
+
+  const none = mkdtempSync(join(tmpdir(), "pi-crew-nogit-"));
+  assert.deepEqual(await verifyDone(good, none, realGit), { ok: false, notes: [`${none} is not a git checkout; head and branch unchecked`] });
 });

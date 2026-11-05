@@ -43,6 +43,30 @@ Should /health check the database too?
 
 Claude answers, reviews finished work (`○ Worker 1 api reports done`), and gives the next task or stops the worker. The transcript keeps the full conversation.
 
+### Checked reports and idle alerts
+
+A worker ends a `DONE:` report with fields the bridge checks against git in the worker's directory:
+
+```
+DONE: verify.sh no longer needs .github/
+head: 3f9c2e1d…
+branch: fix/detach
+tests: bin/test
+rc: 0
+logs: none
+```
+
+The turn then says `DONE checks passed`, or `DONE checks failed:` with what is wrong: a missing field, a non-zero `rc`, a HEAD or branch that differs from the claim, uncommitted changes, work on the default branch, or uncommitted changes in the main checkout when the worker runs in a linked worktree (edits that escaped it). The checks prove the claims, not the work: review the diff before you merge.
+
+A worker on a task that sits idle on intercom, or drops off it, for 10 minutes with no message wakes Claude once, with the last 15 lines of its screen:
+
+```
+◇ Worker 2 slimdown is idle without a report; …
+idle on intercom for 12m, last message 40m ago, with no Q: or DONE:.
+```
+
+It alerts again only after the worker sends a message or gets busy and goes idle again. Set `PI_CREW_IDLE_MIN` to change the threshold, `0` to turn it off. A worker that asked a question or reported done is waiting by design and does not alert.
+
 ### The band and the pane
 
 The band above the prompt shows the crew at a glance. Click a part to open the pane there:
@@ -51,7 +75,7 @@ The band above the prompt shows the crew at a glance. Click a part to open the p
 crew 3 · ◆ 1 needs you · ● 1 · ○ 1 · ✉ 2 new · ? 1 api: Should /health check the database too?
 ```
 
-`/crew` opens the pane: who needs you, what each worker is doing, and its latest few messages.
+`/crew` opens the pane: who needs you, what each worker is doing, and its latest few messages. Claude Code places it: docked beside the transcript in the fullscreen layout from 110 columns, otherwise inline above the prompt. The main-screen layout (`CLAUDE_CODE_NO_FLICKER=0`, and tmux by default) always places it inline.
 
 ```
  Inbox ✉2 ◆1   Crew 3
@@ -91,15 +115,17 @@ Keys in the pane: `1` `2` tabs, `a` `q` `w` `i` `x` filters, `b` back, `y` `n` q
 
 | Tool | Use |
 | --- | --- |
-| `mcp__pi-crew__spawn` `{name, cwd, task?, group?, model?}` | Start `pi-work` in a new agterm session. `model` defaults to `router/openai-work` (`PI_CREW_DEFAULT_MODEL`). |
-| `mcp__pi-crew__send` `{to, text, replyTo?}` | Message a worker by name, or any session by id. |
-| `mcp__pi-crew__list` | Live intercom sessions and the crew. |
+| `mcp__pi-crew__spawn` `{name, cwd, task?, group?, model?, allowDefaultBranch?}` | Start `pi-work` in a new agterm session. `model` defaults to `router/openai-work` (`PI_CREW_DEFAULT_MODEL`). With a task, a `cwd` on the default branch is refused unless `allowDefaultBranch` is set. |
+| `mcp__pi-crew__send` `{to, text, replyTo?}` | Message a worker by name, or any session by full id, session name (any case) or a unique id prefix of 6+ characters. An ambiguous or unknown name fails and lists the live sessions. |
+| `mcp__pi-crew__list` | The crew, one row per worker: state, `waitingOnLead`, unread, time since the last message, live intercom status and how long it has held, context %, open question. Then the live intercom sessions. |
 | `mcp__pi-crew__stop` `{name}` | Close a worker's session. Stop again to forget it. |
 
 ## How it works
 
 - One `crew-bridge` process per agterm pane holds the lead's intercom identity. `/reload-plugins`, `/clear` and resume in that pane keep the same id, and reports that arrived meanwhile are replayed.
 - A worker gets a fixed intercom id from the lead and its name, so a respawned worker keeps its address. It starts a question with `Q:` and a finished task with `DONE:`.
+- The worker's launcher starts it in `cwd`, and its brief tells it to stay there. Pi does not enforce that: a model can still `cd` away, which the DONE checks catch.
+- Idle alerts come from Pi's intercom presence (`idle`, `thinking`, `tool:…`), which also carries context %.
 - The bridge loads the client from Pi's own pi-intercom install, so the wire protocol matches the running broker. Nothing is vendored.
 - State lives in `~/.pi-crew/<pane>/` (mode 0700): workers, a short message log, unanswered reports, briefs.
 
@@ -116,6 +142,16 @@ Cleanup is automatic. The pane is for current work, not history:
 
 - One machine. The broker mailbox is in memory: a broker restart drops queued messages.
 - A worker's model decides whether it follows the brief. Nudge a worker that answers only in its own pane with `send`.
+- Nothing confines a worker to its directory; the brief asks and the DONE checks detect.
+
+## Settings
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `PI_CREW_IDLE_MIN` | `10` | Minutes a working worker may sit idle before Claude is woken; `0` turns the alert off. |
+| `PI_CREW_DEFAULT_MODEL` | `router/openai-work` | Model for `spawn` without `model`. |
+| `PI_CREW_PI_COMMAND` | `pi-work` | The Pi command a worker runs. |
+| `PI_CREW_DIR` | `~/.pi-crew` | Where crew state lives. |
 
 ## Develop
 
