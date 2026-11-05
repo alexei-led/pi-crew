@@ -1,0 +1,7 @@
+#!/bin/sh
+# Run the test suite with Pi's bundled tsx; needs Pi with pi-intercom installed.
+set -eu
+pkg=${PI_CREW_INTERCOM_PKG:-$HOME/.pi/agent/npm/node_modules/pi-intercom}
+here=$(cd "$(dirname "$0")/.." && pwd)
+cd "$here"
+exec node --import "$pkg/../tsx/dist/esm/index.mjs" --test --test-concurrency=1 "$@" test/*.test.mts

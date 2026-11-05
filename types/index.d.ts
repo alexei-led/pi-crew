@@ -22,6 +22,8 @@ declare module 'claude-code' {
       lead: Shaped<CrewLead>
       roster: Shaped<CrewMember[]>
       log: Shaped<CrewMessage[]>
+      /** Ids of worker messages already submitted as turns: a replay after a reload is skipped. */
+      seen: Shaped<string[]>
     }
   }
 }
