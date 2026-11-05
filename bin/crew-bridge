@@ -1,0 +1,6 @@
+#!/bin/sh
+# Run the pi-crew bridge with the tsx loader that ships beside Pi's own pi-intercom install.
+set -eu
+agent_dir=${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}
+here=$(cd "$(dirname "$0")/.." && pwd)
+exec node --import "$agent_dir/npm/node_modules/tsx/dist/esm/index.mjs" "$here/bridge/crew-bridge.mts" "$@"

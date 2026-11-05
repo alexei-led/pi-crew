@@ -1,0 +1,11 @@
+{
+  "name": "pi-crew",
+  "owner": { "name": "Alexei Ledenev" },
+  "plugins": [
+    {
+      "name": "pi-crew",
+      "source": "./",
+      "description": "Lead a crew of Pi workers in agterm over pi-intercom: spawn, message, and get woken by their reports."
+    }
+  ]
+}

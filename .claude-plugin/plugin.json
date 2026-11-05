@@ -1,0 +1,11 @@
+{
+  "name": "pi-crew",
+  "version": "0.1.0",
+  "description": "Lead a crew of Pi workers in agterm over pi-intercom: spawn, message, and get woken by their reports.",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "Alexei Ledenev"
+  },
+  "license": "MIT",
+  "repository": "https://github.com/alexei-led/pi-crew"
+}
