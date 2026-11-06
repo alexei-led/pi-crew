@@ -2,12 +2,13 @@ import { strict as assert } from "node:assert";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, realpathSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import {
   ASK_LIMIT, PREVIEW_LIMIT, WORKER_NAME, appendLine, prune, applyIn, applyOut, classify, defaultBranch, idleDue, idleMs, launchScript, nextNumber, parseDone,
-  parseSessionId, readLines, resolveTarget, stableId, trackLive, upgrade, verifyDone, workerBrief, type Git, type Msg, type Worker,
+  parseRequest, parseSessionId, readJson, readLines, resolveTarget, setAside, stableId, trackLive, upgrade, verifyDone, workerBrief, writeJson,
+  type Git, type Msg, type Worker,
 } from "../bridge/lib.mts";
 
 const base: Worker = { name: "api", id: "w", cwd: "/x", model: "m", n: 1, state: "work", unread: 0, startedAt: 0, lastAt: 0 };
@@ -118,7 +119,56 @@ test("appendLine trims to the newest three quarters; readLines skips torn lines"
   assert.deepEqual(readLines<{ i: number }>(file).map(x => x.i), [3, 4, 5, 6, 7, 8]);
   writeFileSync(file, `${readFileSync(file, "utf8")}{"i":`);
   assert.deepEqual(readLines<{ i: number }>(file, 2).map(x => x.i), [7, 8]);
-  assert.deepEqual(readLines(join(file, "missing")), []);
+  assert.deepEqual(readLines(join(dirname(file), "missing.jsonl")), []);
+});
+
+test("readJson is undefined for a missing file and throws for anything unreadable; setAside keeps the file", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-crew-json-"));
+  const file = join(dir, "state.json");
+  assert.equal(readJson(file), undefined);
+  writeJson(file, { a: 1 });
+  assert.deepEqual(readJson(file), { a: 1 });
+  writeFileSync(file, "{not json");
+  assert.throws(() => readJson(file), SyntaxError);
+  const aside = setAside(file, 42);
+  assert.equal(aside, `${file}.bad-42`);
+  assert.equal(readFileSync(aside, "utf8"), "{not json");
+  assert.equal(readJson(file), undefined);
+});
+
+test("upgrade drops records without name, id, cwd or model", () => {
+  const ok = { name: "a", id: "1", cwd: "/", model: "m" };
+  const bad = [null, 7, "x", [], {}, { ...ok, name: undefined }, { ...ok, id: 3 }, { ...ok, cwd: "" }, { ...ok, model: null }];
+  assert.deepEqual(upgrade([...bad, ok], 9).map(w => w.name), ["a"]);
+});
+
+test("parseRequest accepts each op and rejects wrong types with the field name", () => {
+  const good: Array<[unknown, unknown]> = [
+    [{ op: "list" }, { op: "list" }],
+    [{ op: "send", to: "a", text: "t", extra: 1 }, { op: "send", to: "a", text: "t" }],
+    [{ op: "send", to: "a", text: "", replyTo: "r" }, { op: "send", to: "a", text: "", replyTo: "r" }],
+    [{ op: "spawn", name: "n", cwd: "/", task: "t", allowDefaultBranch: true }, { op: "spawn", name: "n", cwd: "/", task: "t", allowDefaultBranch: true }],
+    [{ op: "stop", name: "n" }, { op: "stop", name: "n" }],
+    [{ op: "read", name: "n" }, { op: "read", name: "n" }],
+    [{ op: "focus", name: "n" }, { op: "focus", name: "n" }],
+    [{ op: "ack", id: "i" }, { op: "ack", id: "i" }],
+  ];
+  for (const [input, parsed] of good) assert.deepEqual(parseRequest(input), parsed);
+  const bad: Array<[unknown, RegExp]> = [
+    [null, /must be a JSON object/],
+    [[], /must be a JSON object/],
+    [{}, /unknown op undefined/],
+    [{ op: "rm" }, /unknown op "rm"/],
+    [{ op: "send", to: "a" }, /send: "text" must be a string/],
+    [{ op: "send", to: 1, text: "t" }, /send: "to" must be a string/],
+    [{ op: "send", to: "a", text: "t", replyTo: 5 }, /"replyTo" must be a string/],
+    [{ op: "spawn", name: "n" }, /spawn: "cwd" must be a string/],
+    [{ op: "spawn", name: "n", cwd: "/", task: {} }, /"task" must be a string/],
+    [{ op: "spawn", name: "n", cwd: "/", allowDefaultBranch: "yes" }, /"allowDefaultBranch" must be a boolean/],
+    [{ op: "stop" }, /stop: "name" must be a string/],
+    [{ op: "ack", id: null }, /ack: "id" must be a string/],
+  ];
+  for (const [input, message] of bad) assert.throws(() => parseRequest(input), message);
 });
 
 test("prune forgets stopped workers after their grace time, with their messages, and drops old messages", () => {
@@ -141,7 +191,7 @@ test("prune keeps each worker's newest messages and gives strangers one shared b
   const ws: Worker[] = [{ ...base, name: "a" }, { ...base, name: "b" }];
   const m = (id: string, worker?: string): Msg => ({ id, at: 0, kind: "report", text: id, peer: worker ?? id, ...(worker ? { worker } : {}) });
   const feed = [m("a1", "a"), m("b1", "b"), m("a2", "a"), m("x1"), m("a3", "a"), m("x2"), m("x3")];
-  assert.deepEqual(prune(ws, feed, 0, 1, 1, 2).feed.map(x => x.id), ["b1", "a2", "a3", "x2", "x3"]);
+  assert.deepEqual(prune(ws, feed, 0, { goneMs: 1, feedMs: 1, perWorker: 2 }).feed.map(x => x.id), ["b1", "a2", "a3", "x2", "x3"]);
 });
 
 test("idleMs reads PI_CREW_IDLE_MIN; 0, junk and negatives turn the alert off", () => {

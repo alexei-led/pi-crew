@@ -1,12 +1,19 @@
-// Pure helpers of the bridge: ids, paths, worker state, the feed, the worker brief and its launch script.
+// Helpers of the bridge: ids, paths, request parsing, worker state, the feed, the worker brief and its launch
+// script. All plain functions of their arguments except the file helpers at the end, which do disk IO.
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import type { CrewMsg, CrewWorker } from "../types/index.d.ts";
+import type { CrewMsg, CrewRequest as Request, CrewWorker } from "../types/index.d.ts";
 
 type Env = Record<string, string | undefined>;
+
+export const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));
+export const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+/** What agtermctl says about a session that is already closed. */
+export const isNoSuchSession = (detail: string) => /no such session/i.test(detail);
 
 /** The pi-intercom package Pi installed; the bridge speaks its exact wire protocol. */
 export const intercomPkg = (env: Env = process.env) =>
@@ -43,6 +50,48 @@ export const idleMs = (env: Env = process.env) => {
   const min = raw ? Number(raw) : DEFAULT_IDLE_MIN;
   return Number.isFinite(min) && min > 0 ? min * 60_000 : 0;
 };
+
+const OPS = ["list", "send", "spawn", "stop", "read", "focus", "ack"] as const;
+
+/** Checks a decoded control-socket request field by field, so a bad one fails here with a clear message. */
+export function parseRequest(raw: unknown): Request {
+  if (!isRecord(raw)) throw new Error("request must be a JSON object");
+  const op = OPS.find(o => o === raw.op);
+  if (!op) throw new Error(`unknown op ${JSON.stringify(raw.op)}`);
+  const field = (name: string, type: "string" | "boolean", required: boolean) => {
+    const value = raw[name];
+    if (value === undefined && !required) return undefined;
+    if (typeof value !== type) throw new Error(`${op}: "${name}" must be a ${type}`);
+    return value;
+  };
+  const str = (name: string) => field(name, "string", true) as string;
+  const optStr = (name: string) => field(name, "string", false) as string | undefined;
+  const optBool = (name: string) => field(name, "boolean", false) as boolean | undefined;
+  switch (op) {
+    case "list":
+      return { op };
+    case "send": {
+      const replyTo = optStr("replyTo");
+      return { op, to: str("to"), text: str("text"), ...(replyTo !== undefined ? { replyTo } : {}) };
+    }
+    case "spawn": {
+      const [model, task, group, allowDefaultBranch] = [optStr("model"), optStr("task"), optStr("group"), optBool("allowDefaultBranch")];
+      return {
+        op, name: str("name"), cwd: str("cwd"),
+        ...(model !== undefined ? { model } : {}), ...(task !== undefined ? { task } : {}), ...(group !== undefined ? { group } : {}),
+        ...(allowDefaultBranch !== undefined ? { allowDefaultBranch } : {}),
+      };
+    }
+    case "stop":
+    case "read":
+    case "focus":
+      return { op, name: str("name") };
+    case "ack":
+      return { op, id: str("id") };
+    default:
+      return op satisfies never;
+  }
+}
 
 /** A deterministic UUID-shaped id, so a restarted bridge or worker keeps its broker mailbox. */
 export function stableId(...parts: string[]): string {
@@ -215,10 +264,18 @@ export function applyOut(w: Worker, msg: Msg): Worker {
 
 export const nextNumber = (workers: Iterable<Worker>) => Math.max(0, ...[...workers].map(w => w.n || 0)) + 1;
 
-/** Records written by 0.1 lack the 0.2 fields: number them in file order and assume they still run. */
-export function upgrade(list: Partial<Worker>[], now = Date.now()): Worker[] {
-  let n = Math.max(0, ...list.map(w => w.n || 0));
-  return list.map(w => ({ state: "work", unread: 0, startedAt: now, lastAt: now, ...w, n: w.n || ++n }) as Worker);
+type Identified = Partial<Worker> & Pick<Worker, "name" | "id" | "cwd" | "model">;
+const hasIdentity = (w: unknown): w is Identified =>
+  isRecord(w) && [w.name, w.id, w.cwd, w.model].every(v => typeof v === "string" && v !== "");
+
+/**
+ * Records written by 0.1 lack the 0.2 fields: number them in file order and assume they still run. A record without
+ * name, id, cwd or model cannot be a worker and is dropped.
+ */
+export function upgrade(list: unknown[], now = Date.now()): Worker[] {
+  const valid = list.filter(hasIdentity);
+  let n = Math.max(0, ...valid.map(w => w.n || 0));
+  return valid.map(w => ({ state: "work", unread: 0, startedAt: now, lastAt: now, ...w, n: w.n || ++n }));
 }
 
 /**
@@ -226,7 +283,8 @@ export function upgrade(list: Partial<Worker>[], now = Date.now()): Worker[] {
  * than `feedMs`. Messages from sessions the lead did not spawn share one `perWorker` budget.
  */
 export function prune(
-  workers: Worker[], feed: Msg[], now: number, goneMs = GONE_TTL_MS, feedMs = FEED_TTL_MS, perWorker = FEED_PER_WORKER,
+  workers: Worker[], feed: Msg[], now: number,
+  { goneMs = GONE_TTL_MS, feedMs = FEED_TTL_MS, perWorker = FEED_PER_WORKER }: { goneMs?: number; feedMs?: number; perWorker?: number } = {},
 ) {
   const kept = workers.filter(w => w.state !== "gone" || now - w.lastAt < goneMs);
   const names = new Set(kept.map(w => w.name));
@@ -245,26 +303,6 @@ export function prune(
     feed: recent.reverse(),
     forgotten: workers.filter(w => !names.has(w.name)).map(w => w.name),
   };
-}
-
-/** Appends one JSON line; past `max` lines keeps the newest three quarters. */
-export function appendLine(file: string, value: unknown, max = FEED_LINES) {
-  appendFileSync(file, `${JSON.stringify(value)}\n`, { mode: 0o600 });
-  const lines = readFileSync(file, "utf8").split("\n").filter(Boolean);
-  if (lines.length > max) writeFileSync(file, `${lines.slice(-Math.floor((max * 3) / 4)).join("\n")}\n`, { mode: 0o600 });
-}
-
-/** The newest `limit` parseable lines; a torn last line is skipped. */
-export function readLines<T>(file: string, limit = Infinity): T[] {
-  if (!existsSync(file)) return [];
-  const out: T[] = [];
-  for (const line of readFileSync(file, "utf8").split("\n")) {
-    if (!line) continue;
-    try {
-      out.push(JSON.parse(line) as T);
-    } catch {}
-  }
-  return out.slice(-limit);
 }
 
 /** The first prompt a spawned worker reads: who leads it and how to report. */
@@ -316,6 +354,66 @@ export function parseSessionId(stdout: string): string | undefined {
     const id = parsed.result?.session?.id ?? parsed.result?.id;
     return typeof id === "string" && id ? id : undefined;
   } catch {
-    return undefined;
+    return undefined; // not JSON: no session id
   }
+}
+
+// File helpers. State files are written whole through a temp file and a rename, so a crash leaves the old one.
+
+export function writeJson(path: string, value: unknown) {
+  const tmp = `${path}.tmp`;
+  writeFileSync(tmp, JSON.stringify(value, null, 2), { mode: 0o600 });
+  renameSync(tmp, path);
+}
+
+/** The parsed file, or undefined when it does not exist. Any other failure (unreadable, not JSON) throws. */
+export function readJson(path: string): unknown {
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    if (isRecord(error) && error.code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+/** Renames a state file nobody can read to `<name>.bad-<time>`, so the next save does not overwrite it. */
+export function setAside(path: string, now = Date.now()): string {
+  const aside = `${path}.bad-${now}`;
+  renameSync(path, aside);
+  return aside;
+}
+
+/** Appends one JSON line; past `max` lines keeps the newest three quarters. */
+export function appendLine(file: string, value: unknown, max = FEED_LINES) {
+  appendFileSync(file, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+  const lines = readFileSync(file, "utf8").split("\n").filter(Boolean);
+  if (lines.length > max) writeFileSync(file, `${lines.slice(-Math.floor((max * 3) / 4)).join("\n")}\n`, { mode: 0o600 });
+}
+
+/** Replaces a line file whole. */
+export function writeLines(file: string, values: unknown[]) {
+  const tmp = `${file}.tmp`;
+  writeFileSync(tmp, values.map(v => `${JSON.stringify(v)}\n`).join(""), { mode: 0o600 });
+  renameSync(tmp, file);
+}
+
+/** The newest `limit` parseable lines; a missing file is empty and a torn line is skipped. */
+export function readLines<T>(file: string, limit = Infinity): T[] {
+  let text: string;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch (error) {
+    if (isRecord(error) && error.code === "ENOENT") return [];
+    throw error;
+  }
+  const out: T[] = [];
+  for (const line of text.split("\n")) {
+    if (!line) continue;
+    try {
+      out.push(JSON.parse(line) as T);
+    } catch {
+      // A crash can tear the last line; the rest of the feed is still good.
+    }
+  }
+  return out.slice(-limit);
 }
