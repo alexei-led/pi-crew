@@ -31,7 +31,10 @@ test("workerBrief names the lead id and carries the task", () => {
   const brief = workerBrief({ name: "lead", id: "LEAD-ID" }, worker, "do the thing");
   assert.match(brief, /to: "LEAD-ID"/);
   assert.match(brief, /if you changed files, commit first/);
-  assert.match(brief, /changes nothing reports the current HEAD and `tests: none`/);
+  assert.match(brief, /changes nothing reports the current HEAD/);
+  assert.match(brief, /Report the checks you actually ran and their rc; use `tests: none` only if you ran none/);
+  assert.match(brief, /After a Q:, DONE: or blocker send, stop and wait/);
+  assert.match(brief, /After a progress report, keep working/);
   assert.match(brief, /Progress reports are allowed/);
   assert.match(brief, /First task:\ndo the thing$/);
   assert.match(brief, /working directory is \/x\. Run every command there/);

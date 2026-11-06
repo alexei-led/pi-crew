@@ -3,7 +3,7 @@ import type { EngineInterface as Engine, Register } from 'claude-code'
 
 import type { CrewFilter, CrewLead, CrewMsg, CrewTab, CrewView, CrewWorker } from '../types'
 import {
-  COLOR, GLYPH, LABEL, UNREAD, age, clampText, clip, fold, groups, inboxOrder, matches, nextQuestion, oneLine, tag,
+  COLOR, GLYPH, LABEL, UNREAD, age, bandQuestion, clampText, clip, fold, groups, inboxOrder, matches, nextQuestion, oneLine, tag,
   tally, threadOf, turnText, type Inbound,
 } from './model'
 
@@ -290,36 +290,46 @@ export const register: Register = on => {
     const q = nextQuestion(ws)
     const now = await $.clock.now()
     const cols = e.props.bodyColumns
-    const compact = cols < 80
-    const crewLabel = `crew ${t.crew}`
-    const question = q?.ask ? `${GLYPH.ask} ${t.ask > 1 ? `${t.ask} · ` : ''}${tag(q)} ${age(q.ask.at, now)}: ${oneLine(q.ask.text)}` : ''
+    // Budgets use UTF-16 length, not terminal cells; wide CJK/emoji can still misfit.
+    const crewHotkey = cols >= 3 ? 'c' : undefined
+    const crewLabel = clip(`crew ${t.crew}`, Math.max(0, cols - (crewHotkey ? 3 : 0)))
+    const crewWidth = crewLabel.length + (crewHotkey ? 3 : 0)
+    const separator = cols >= crewWidth + 3 + 3 + (q ? String(q.n).length + 2 : 0) ? ' · ' : ' '
+    const questionOverhead = q ? separator.length + 3 : 0
+    const questionFloor = q ? `${t.ask > 1 ? `${GLYPH.ask}${t.ask} · ` : `${GLYPH.ask} `}${q.n}` : ''
+    const questionFull = q ? bandQuestion(q, t.ask, now, Number.MAX_SAFE_INTEGER) : ''
+    let remaining = Math.max(0, cols - crewWidth - questionOverhead)
     const chips = [
       { key: 'unread', count: t.unread, glyph: UNREAD, word: 'new', hotkey: 'u', tab: 'inbox' as const, filter: 'all' as const },
       { key: 'work', count: t.work, glyph: GLYPH.work, word: LABEL.work, tab: 'crew' as const, filter: 'work' as const },
       { key: 'idle', count: t.idle, glyph: GLYPH.idle, word: LABEL.idle, tab: 'crew' as const, filter: 'idle' as const },
       { key: 'gone', count: t.gone, glyph: GLYPH.gone, word: LABEL.gone, tab: 'crew' as const, filter: 'gone' as const },
-    ].filter(c => c.count > 0).map(c => ({ ...c, label: compact ? `${c.glyph}${c.count}` : `${c.glyph} ${c.count} ${c.word}` }))
-    let used = crewLabel.length + 3
-    const reserve = question ? Math.min(question.length + 6, 30) : 0
-    const visible = chips.filter(c => {
-      const size = c.label.length + 3 + (c.hotkey ? 3 : 0)
-      if (used + size + reserve > cols) return false
-      used += size
-      return true
+    ].filter(c => c.count > 0)
+    const visible = chips.flatMap(c => {
+      // Protect question identity and unread first; secondary counts cannot shorten the question.
+      const reserve = q ? c.key === 'unread' ? questionFloor.length : questionFull.length : 0
+      const overhead = separator.length + (c.hotkey ? 3 : 0)
+      const full = `${c.glyph} ${c.count} ${c.word}`
+      const compact = `${c.glyph}${c.count}`
+      const label = full.length + overhead + reserve <= remaining ? full : compact.length + overhead + reserve <= remaining ? compact : ''
+      if (!label) return []
+      remaining -= label.length + overhead
+      return [{ ...c, label }]
     })
+    const question = q ? bandQuestion(q, t.ask, now, remaining) : ''
     return (
       <Box flexDirection="row" flexWrap="nowrap">
-        <Button plain hotkey="c" key="crew" label={crewLabel} onPress={() => openPane($, { tab: 'crew', filter: 'all' })} />
+        <Button plain hotkey={crewHotkey} key="crew" label={crewLabel} onPress={() => openPane($, { tab: 'crew', filter: 'all' })} />
+        {q?.ask && question && <Text dimColor>{separator}</Text>}
+        {q?.ask && question && <Button plain hotkey="a" key="next" label="answer oldest question" onPress={() => openPane($, { tab: 'inbox', filter: 'ask' }, q)}>
+          <Text color={COLOR.ask}>{question}</Text>
+        </Button>}
         {visible.map(c => <Box key={c.key} flexDirection="row">
-          <Text dimColor> · </Text>
+          <Text dimColor>{separator}</Text>
           <Button plain hotkey={c.hotkey} key={c.key} label={c.label} onPress={() => openPane($, { tab: c.tab, filter: c.filter })}>
             <Text color={c.key === 'work' ? COLOR.work : c.key === 'unread' ? 'cyan' : undefined} dimColor={c.key === 'gone'}>{c.label}</Text>
           </Button>
         </Box>)}
-        {q?.ask && <Text dimColor> · </Text>}
-        {q?.ask && <Button plain hotkey="a" key="next" label="answer oldest question" onPress={() => openPane($, { tab: 'inbox', filter: 'ask' }, q)}>
-          <Text color={COLOR.ask}>{clip(question, Math.max(1, cols - used - 6))}</Text>
-        </Button>}
       </Box>
     )
   })
@@ -331,10 +341,10 @@ export const register: Register = on => {
     const fd = await read($, feed)
     await read($, tick)
     const now = await $.clock.now()
-    const cols = Math.max(24, e.props.bodyColumns)
+    const cols = Math.max(1, e.props.bodyColumns)
     const narrow = e.props.placement === 'inline' || cols < 60
     const t = tally(ws)
-    const tagWidth = Math.min(18, Math.max(5, ...ws.map(w => tag(w).length)))
+    const tagWidth = Math.min(18, Math.floor(cols * 0.4), Math.max(5, ...ws.map(w => tag(w).length)))
 
     const glyph = (w: CrewWorker) => <Text color={COLOR[w.state]}>{GLYPH[w.state]}</Text>
 
@@ -347,15 +357,22 @@ export const register: Register = on => {
     let firstRow = true
     const row = (w: CrewWorker, indent = '') => {
       const preview = oneLine(w.state === 'ask' && w.ask ? w.ask.text : (w.last?.text ?? LABEL[w.state]))
-      const fixed = indent.length + 2 + tagWidth + 1 + 4 + (w.unread ? 4 : 0) + 1
+      indent = clip(indent, Math.max(0, cols - 2))
+      const prefix = clip(`${indent}${GLYPH[w.state]} `, cols)
+      const unread = w.unread ? clip(` ${UNREAD}${Math.min(w.unread, 99)}`, Math.max(0, cols - prefix.length)) : ''
+      const nameWidth = Math.min(tagWidth, Math.max(0, cols - prefix.length - unread.length))
+      const name = clip(tag(w), nameWidth).padEnd(nameWidth)
+      let room = cols - prefix.length - name.length - unread.length
+      const time = room >= 5 ? ` ${clip(age(w.lastAt, now), 4).padStart(4)}` : ''
+      room -= time.length
+      const excerpt = room >= 5 ? ` ${clip(preview, room - 1)}` : ''
       const autoFocus = firstRow ? true : undefined
       firstRow = false
       return (
         <Button plain autoFocus={autoFocus} key={`w-${w.name}`} label={`${tag(w)} ${LABEL[w.state]}`} onPress={() => openThread($, w)}>
-          {indent}
-          {glyph(w)} {clip(tag(w), tagWidth).padEnd(tagWidth)} <Text dimColor>{age(w.lastAt, now).padStart(4)}</Text>
-          {w.unread ? <Text color="cyan">{` ${UNREAD}${Math.min(w.unread, 99)}`}</Text> : ''}{' '}
-          <Text dimColor={w.state !== 'ask'}>{clip(preview, cols - fixed)}</Text>
+          <Text color={COLOR[w.state]}>{prefix}</Text>{name}<Text dimColor>{time}</Text>
+          <Text color="cyan">{unread}</Text>
+          <Text dimColor={w.state !== 'ask'}>{excerpt}</Text>
         </Button>
       )
     }
@@ -374,7 +391,7 @@ export const register: Register = on => {
       const msgs = threadOf(fd, w.name)
       const { hidden, shown } = fold(msgs, v.showAll ? RECENT_MORE : RECENT)
       const bodyLines = v.showAll ? 8 : 3
-      const question = w.ask ? clampText(w.ask.text, narrow ? 4 : 8, cols - 4) : undefined
+      const question = w.ask ? clampText(w.ask.text, narrow ? 4 : 8, Math.max(1, cols - 4)) : undefined
       const confirming = v.confirmStop === w.name
       return (
         <Box flexDirection="column">
@@ -396,7 +413,7 @@ export const register: Register = on => {
               await setView($, {})
               if (await act($, { op: 'stop', name: w.name }, `stop ${tag(w)}`)) await setView($, w.state === 'gone' ? { sel: undefined } : {})
             }} />
-            <Text> </Text><Button plain key="cancel" label="cancel" onPress={() => setView($, {})} />
+            <Text> </Text><Button plain hotkey="v" key="cancel" label="cancel" onPress={() => setView($, {})} />
           </Box>}
           <Text>{glyph(w)}<Text bold>{` ${clip(tag(w), narrow ? Math.max(8, cols - 4) : cols)}`}</Text></Text>
           <Text dimColor>{clip(`${w.group ? `${w.group} · ` : ''}${LABEL[w.state]} · ${age(w.startedAt, now)}`, cols)}</Text>
@@ -406,7 +423,7 @@ export const register: Register = on => {
               <Text color={COLOR.ask} bold>{`${GLYPH.ask} question · ${age(w.ask.at, now)}`}</Text>
               <Text>{v.questionExpanded ? w.ask.text : `${question?.text}${question?.more ? ' …' : ''}`}</Text>
               {question?.more && <Button plain hotkey="d" key="question-expand" label={v.questionExpanded ? 'collapse question' : 'full question'} onPress={() => setView($, { questionExpanded: !v.questionExpanded })} />}
-              <Box flexDirection="row">
+              <Box flexDirection="row" flexWrap="wrap">
                 <Button plain hotkey="y" key="yes" label="send yes" onPress={() => reply($, w, 'yes')} />
                 <Text>  </Text>
                 <Button plain hotkey="n" key="no" label="send no" onPress={() => reply($, w, 'no')} />
@@ -416,7 +433,7 @@ export const register: Register = on => {
           )}
           <Box flexDirection="column" marginTop={1}>
             {msgs.length === 0 && <Text dimColor>No messages yet.</Text>}
-            {msgs.length > 0 && <Box flexDirection="row">
+            {msgs.length > 0 && <Box flexDirection="row" flexWrap="wrap">
               <Text dimColor>{`latest ${shown.length}${hidden ? ` of ${msgs.length}` : ''} · full text in the transcript  `}</Text>
               {(hidden > 0 || v.showAll) && (
                 <Button plain dimColor hotkey="e" key="more" label={v.showAll ? 'less' : 'more'} onPress={() => setView($, { showAll: !v.showAll })} />
@@ -439,7 +456,7 @@ export const register: Register = on => {
           {w.state !== 'gone' && (
             <Input key={`reply-${w.name}`} placeholder={`message ${tag(w)} · Enter sends`} submitLabel="send" rows={2} onInput={async () => { await setView($, {}) }} onSubmit={value => reply($, w, value)} />
           )}
-          <Box flexDirection="row" flexWrap="wrap"><Text dimColor>{`b back${hidden > 0 || v.showAll ? ' · e more' : ''}${w.agtermSession ? ' · o terminal' : ''} · s ${w.state === 'gone' ? 'forget' : 'stop'} · `}</Text>{closeHint}</Box>
+          <Box flexDirection="row" flexWrap="wrap"><Text dimColor>{`b back${hidden > 0 || v.showAll ? ' · e more' : ''}${w.agtermSession ? ' · o terminal' : ''}${w.ask ? `${question?.more ? ' · d full question' : ''} · y/n send` : ''} · s ${w.state === 'gone' ? 'forget' : 'stop'} · Tab move · Enter activate · Esc/`}</Text>{closeHint}</Box>
         </Box>
       )
     }
@@ -521,7 +538,7 @@ export const register: Register = on => {
           ))}
         </Box>
         {body()}
-        <Box flexDirection="row" flexWrap="wrap"><Text dimColor>1/2 tabs · a n w i s filter · Enter open · </Text>{closeHint}</Box>
+        <Box flexDirection="row" flexWrap="wrap"><Text dimColor>1/2 tabs · a n w i s filter · Tab move · Enter activate · Esc/</Text>{closeHint}</Box>
       </Box>
     )
   })

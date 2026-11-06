@@ -22,7 +22,8 @@ export function age(at: number, now: number): string {
 export const oneLine = (text: string) => text.replace(/\s+/g, ' ').trim()
 
 export function clip(text: string, max: number): string {
-  if (max <= 1) return text ? '…' : ''
+  if (max <= 0) return ''
+  if (max === 1) return text ? '…' : ''
   return text.length > max ? `${text.slice(0, max - 1)}…` : text
 }
 
@@ -122,11 +123,30 @@ export function turnText(worker: CrewWorker | undefined, ev: Inbound, notes?: st
   return [
     turnHead(worker, ev.kind, peer),
     ...(ev.kind === 'ask' ? [`Answer with mcp__pi-crew__send to "${peer}" replyTo "${ev.id}".`] : []),
-    `intercom id ${ev.from.id}, cwd ${ev.from.cwd}, message ${ev.id}${ev.replyTo ? `, in reply to ${ev.replyTo}` : ''}`,
     ...(ev.kind === 'idle' ? [`Check it: its screen below, mcp__pi-crew__send to nudge "${peer}", or mcp__pi-crew__stop.`] : []),
+    `intercom id ${ev.from.id}, cwd ${ev.from.cwd}, message ${ev.id}${ev.replyTo ? `, in reply to ${ev.replyTo}` : ''}`,
     ...(checks ? [checks] : []),
     ...(notes?.length ? [`Since its last report the user wrote to ${peer} from the crew pane: ${notes.map(n => `"${n}"`).join(', ')}`] : []),
     '',
     ev.text,
   ].join('\n')
+}
+
+
+/** Fit the identity before the preview, sacrificing the name before question text. */
+export function bandQuestion(w: CrewWorker, count: number, now: number, width: number): string {
+  if (!w.ask || width <= 0) return ''
+  const fullPrefix = count > 1 ? `${GLYPH.ask} ${count} asks · ` : `${GLYPH.ask} `
+  const compactPrefix = count > 1 ? `${GLYPH.ask}${count} · ` : `${GLYPH.ask} `
+  const suffix = ` ${age(w.ask.at, now)}: ${oneLine(w.ask.text)}`
+  const prefix = fullPrefix.length + String(w.n).length + 2 + ` ${age(w.ask.at, now)}: `.length + 1 <= width ? fullPrefix : compactPrefix
+  const identity = `${prefix}${w.n}`
+  if (identity.length > width) return clip(count > 1 ? `${GLYPH.ask}${count}` : `${GLYPH.ask}${w.n}`, width)
+  const nameWidth = Math.max(1, Math.min(w.name.length, width - identity.length - 1 - suffix.length))
+  const name = clip(w.name, nameWidth)
+  const label = `${identity}${name ? ` ${name}` : ''}${suffix}`
+  if (label.length <= width) return label
+  // If even the age and preview cannot fit, retain as much worker identity as possible.
+  if (identity.length + ` ${age(w.ask.at, now)}: `.length + 1 > width) return clip(`${identity} ${w.name}`, width)
+  return clip(label, width)
 }

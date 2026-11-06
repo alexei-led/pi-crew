@@ -48,6 +48,8 @@ test("clampText wraps long lines and cuts at the line budget", () => {
   assert.deepEqual(clampText("a\n\nb", 3, 4), { text: "a\n\nb", more: false });
   assert.equal(clip("hello", 3), "he…");
   assert.equal(clip("hi", 3), "hi");
+  assert.equal(clip("hello", 0), "");
+  assert.equal(clip("hello", -1), "");
 });
 
 test("turnHead uses the same glyph, number and name as the pane", () => {
@@ -82,4 +84,13 @@ test("turn text puts the headline, answer instruction and metadata on separate l
   assert.match(done[2]!, /^DONE checks passed:/);
   assert.match(done[3]!, /user wrote to api.*"ship it"/);
   assert.deepEqual(done.slice(4), ["", "Question?"]);
+});
+
+
+test("idle turn instruction follows the headline before metadata", () => {
+  const lines = turnText(w("api", 3), { type: "message", kind: "idle", id: "idle", expectsReply: false, from: { id: "session", cwd: "/w", worker: "api" }, text: "screen" }).split("\n");
+  assert.equal(lines[0], "◇ Worker 3 api is idle without a report");
+  assert.equal(lines[1], 'Check it: its screen below, mcp__pi-crew__send to nudge "api", or mcp__pi-crew__stop.');
+  assert.equal(lines[2], "intercom id session, cwd /w, message idle");
+  assert.deepEqual(lines.slice(3), ["", "screen"]);
 });

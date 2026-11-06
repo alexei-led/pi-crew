@@ -57,7 +57,7 @@ rc: 0
 logs: none
 ```
 
-If the task changes files, the worker commits first. A task that changes nothing reports the current HEAD and `tests: none`. Progress reports are allowed; each finished task or question gets exactly one final send.
+If the task changes files, the worker commits first. A task that changes nothing reports the current HEAD and the checks actually run with their rc. Use `tests: none` only if no checks ran. Progress reports are allowed and the worker keeps working after them. Each finished task or question gets exactly one final send, then the worker waits.
 
 The turn then says `DONE checks passed`, or `DONE checks failed:` with what is wrong: a missing field, a non-zero `rc`, a HEAD or branch that differs from the claim, uncommitted changes, work on the default branch (unless spawned with `allowDefaultBranch: true`), or uncommitted changes in the main checkout when the worker runs in a linked worktree (edits that escaped it). The checks prove the claims, not the work: review the diff before you merge.
 
@@ -76,10 +76,10 @@ It alerts again only after the worker sends a message or gets busy and goes idle
 The band above the prompt shows the crew at a glance. Click a part to open the pane there:
 
 ```
-c: crew 3 · u: ✉ 2 new · ● 1 working · ○ 1 idle · a: ◆ 1 api 4m: Should /health check the database too?
+c: crew 3 · a: ◆ 1 api 4m: Should /health check the database too? · u: ✉ 2 new · ● 1 working · ○ 1 idle
 ```
 
-Zero counts are hidden. In a narrow band, counts become compact (`●1`) and secondary chips drop before the question. The question stays at normal contrast in yellow and opens its worker’s thread. With several open questions, it shows their count before the oldest worker (`◆ 2 · 1 api 4m: …`). Working is green, unread is cyan, and stopped is dim; glyphs and words carry the same meaning without color.
+Zero counts are hidden. The band prioritizes crew, question, unread, working, idle, then stopped. Each count uses words when they fit, then compact form (`●1`), then hides. The question clips the worker name before its text. The question stays at normal contrast in yellow and opens its worker’s thread. With several open questions, it shows their count before the oldest worker (`◆ 2 asks · 1 api 4m: …`, or `◆2 · 1 api…` when tight). Working is green, unread is cyan, and stopped is dim; glyphs and words carry the same meaning without color.
 
 `/crew` opens the pane: who needs you, what each worker is doing, and its latest few messages. Claude Code places it: docked beside the transcript in the fullscreen layout from 110 columns, otherwise inline above the prompt. The main-screen layout (`CLAUDE_CODE_NO_FLICKER=0`, and tmux by default) always places it inline.
 
@@ -92,7 +92,7 @@ Zero counts are hidden. In a narrow band, counts become compact (`●1`) and sec
  ● 2 web   now ✉1 status page wired, tests running
  ○ 3 docs  40m    README updated
 
- 1/2 tabs · a n w i s filter · Enter open · q: close
+ 1/2 tabs · a n w i s filter · Tab move · Enter activate · Esc/q: close
 ```
 
 Select a worker for its detail:
@@ -111,7 +111,7 @@ Select a worker for its detail:
    status page wired, tests running
 
  ┌ message 2 web · Enter sends ──────────────────────────────┐
- b back · e more · o terminal · s stop · q: close
+ b back · e more · o terminal · s stop · Tab move · Enter activate · Esc/q: close
 ```
 
 | Glyph | State |
@@ -131,10 +131,12 @@ In the pane:
 
 - `q`, `x` or `Esc`: close. The top-right `×` also closes.
 - `1` / `2`: Inbox / Crew. `a` / `n` / `w` / `i` / `s`: all / needs you / working / idle / stopped.
-- `Enter`: open the first visible worker initially; Tab moves focus.
+- Tab moves focus; Enter activates the focused control. The first visible worker starts focused.
 - Detail: `b` back (keeps tab/filter), `e` more/less messages, `d` expand/collapse a cut question, `o` worker terminal.
 - `y` / `n`: send yes / send no. Type in the message field and press Enter to send; Claude hears about it with the worker's next report.
-- Detail `s` arms stop (or forget for a stopped worker); `c` confirms. Stopping closes the session and ends current work. The mouse-only cancel button or another action disarms it. Confirmation never takes focus automatically.
+- Detail `s` arms stop (or forget for a stopped worker); `c` confirms. Stopping closes the session and ends current work. The cancel button (`v`) or another action disarms it. Confirmation never takes focus automatically.
+
+Shortcuts do not apply while the message box has focus: keys type text, Enter sends, and Esc closes the pane.
 
 Long worker names are clipped in narrow lists; detail actions stay on separate lines from the worker identity.
 

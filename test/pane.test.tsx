@@ -153,7 +153,7 @@ for (const state of ['work', 'gone']) {
     expect(attempts).toBe(0)
     expect((await ui.find({ key: 'confirm' }))?.props.hotkey).toBe('c')
     expect((await ui.find({ key: 'confirm' }))?.props.autoFocus).toBeFalsy()
-    expect((await ui.find({ key: 'cancel' }))?.props.hotkey).toBeUndefined()
+    expect((await ui.find({ key: 'cancel' }))?.props.hotkey).toBe('v')
     await ui.press({ key: 'cancel' })
     await ui.unmount()
     ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
@@ -221,7 +221,7 @@ test('the narrow band drops secondary chips before the question', async ($, on) 
   seed(on, { workers: { shape: 'workers-1', value: WORKERS } })
   const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 40 }, surface: 'terminal' })
   expect(await ui.find({ key: 'work' })).toBeFalsy()
-  expect((await ui.find({ key: 'next' }))?.text).toMatch(/^◆ 1 api 1m:/)
+  expect((await ui.find({ key: 'next' }))?.text).toMatch(/^◆ 1 /)
   const tree = await ui.findAll({ type: 'Button' })
   const width = tree.reduce((n, b) => n + b.text.length + (b.props.hotkey ? 3 : 0), (tree.length - 1) * 3)
   expect(width <= 40).toBe(true)
@@ -271,7 +271,7 @@ test('the wide band labels nonzero states and the compact band shortens them', a
   let ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
   for (const [key, label] of [['work', '● 1 working'], ['idle', '○ 1 idle'], ['gone', '✕ 1 stopped']]) expect((await ui.find({ type: 'Button', key }))?.text).toBe(label)
   await ui.unmount()
-  ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 50 }, surface: 'terminal' })
+  ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 20 }, surface: 'terminal' })
   expect((await ui.find({ type: 'Button', key: 'work' }))?.text).toBe('●1')
   await ui.unmount()
 })
@@ -286,8 +286,8 @@ test('the band counts open questions and answers the oldest in ask color', async
   seed(on, values)
   on('ui.open', () => ({ value: { isPlaced: true } }))
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect((await ui.find({ type: 'Button', key: 'next' }))?.text).toBe('◆ 2 · 1 api 1m: Use Postgres?')
-  expect((await ui.find({ type: 'Text', text: /^◆ 2 · 1 api/ }))?.props.color).toBe('yellow')
+  expect((await ui.find({ type: 'Button', key: 'next' }))?.text).toBe('◆ 2 asks · 1 api 1m: Use Postgres?')
+  expect((await ui.find({ type: 'Text', text: /^◆ 2 asks · 1 api/ }))?.props.color).toBe('yellow')
   expect((await ui.find({ type: 'Button', key: 'next' }))?.props.hotkey).toBe('a')
   await ui.press({ key: 'next' })
   expect(values.view?.value).toMatchObject({ tab: 'inbox', filter: 'ask', sel: 'api' })
@@ -301,5 +301,45 @@ test('band state colors reinforce the glyphs and words', async ($, on) => {
   expect((await ui.find({ type: 'Text', text: /^● 1 working$/ }))?.props.color).toBe('green')
   expect((await ui.find({ type: 'Text', text: /^✉ 1 new$/ }))?.props.color).toBe('cyan')
   expect((await ui.find({ type: 'Text', text: /^✕ 1 stopped$/ }))?.props.dimColor).toBe(true)
+  await ui.unmount()
+})
+
+
+for (const columns of [15, 40, 79, 80, 120]) {
+  test(`band priority layout fits ${columns} columns with long names and two questions`, async ($, on) => {
+    seed(on, { workers: { shape: 'workers-1', value: [
+      worker('a'.repeat(32), 1, { state: 'ask', unread: 2, ask: { id: 'q1', at: 0, text: 'Use Postgres?' } }),
+      worker('later', 2, { state: 'ask', ask: { id: 'q2', at: 1, text: 'Later question?' } }),
+      worker('working', 3), worker('idle', 4, { state: 'idle' }), worker('gone', 5, { state: 'gone' }),
+    ] } })
+    const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: columns }, surface: 'terminal' })
+    const text = (await ui.find({ type: 'Box' }))?.text ?? ''
+    const buttons = await ui.findAll({ type: 'Button' })
+    const width = text.length + buttons.filter(b => b.props.hotkey).length * 3
+    expect(width <= columns).toBe(true)
+    expect((await ui.find({ type: 'Button', key: 'crew' }))?.text).toBe('crew 4')
+    const question = await ui.find({ type: 'Button', key: 'next' })
+    expect(question?.text).toMatch(/^◆(?: 2 asks|2)/)
+    if (columns === 15) expect(question?.text).toBe('◆2')
+    if (columns === 40) {
+      expect(await ui.find({ type: 'Button', key: 'unread' })).toBeTruthy()
+      expect(await ui.find({ type: 'Button', key: 'work' })).toBeFalsy()
+    }
+    await ui.unmount()
+  })
+}
+
+test('a grouped 24-column worker row clips its tag and drops preview before age', async ($, on) => {
+  const name = 'a'.repeat(32)
+  seed(on, {
+    workers: { shape: 'workers-1', value: [worker(name, 12, { group: 'app', unread: 99, last: { id: 'last', at: 0, text: 'preview must disappear' } })] },
+    view: { shape: 'view-3', value: { tab: 'crew', filter: 'all', showAll: false, questionExpanded: false, collapsed: [] } },
+  })
+  const ui = await $.ui.mount({ ...PANE, props: { ...props, bodyColumns: 24, placement: 'inline' }, surface: 'terminal' })
+  const row = await ui.find({ type: 'Button', key: `w-${name}` })
+  expect((row?.text ?? '').length <= 24).toBe(true)
+  expect(row?.text).toMatch(/^  ● 12 a+…/)
+  expect(row?.text).toMatch(/1m.*✉99/)
+  expect(row?.text.includes('preview')).toBe(false)
   await ui.unmount()
 })
