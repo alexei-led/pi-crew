@@ -1,10 +1,10 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface as Engine, Register } from 'claude-code'
 
-import type { CrewFilter, CrewLead, CrewMsg, CrewTab, CrewView, CrewWorker } from '../types'
+import type { CrewFilter, CrewMsg, CrewTab, CrewView, CrewWorker } from '../types'
 import {
-  COLOR, GLYPH, LABEL, UNREAD, age, checksLine, clampText, clip, fold, groups, inboxOrder, matches, nextQuestion, oneLine, tag,
-  tally, threadOf, turnHead,
+  COLOR, GLYPH, LABEL, UNREAD, age, bandQuestion, clampText, clip, fold, groups, inboxOrder, matches, nextQuestion, oneLine, tag,
+  tally, threadOf, turnText, type Inbound,
 } from './model'
 
 const PLUGIN = 'pi-crew'
@@ -19,24 +19,12 @@ const BRIDGE_ATTEMPTS = 20
 const SUBMIT_ATTEMPTS = 10
 const TICK_MS = 60_000
 
-const lead = atom({ plugin: 'pi-crew', key: 'lead' } as const, null as CrewLead, { shape: 'lead-1' })
 const workers = atom({ plugin: 'pi-crew', key: 'workers' } as const, [] as CrewWorker[], { shape: 'workers-1' })
 const feed = atom({ plugin: 'pi-crew', key: 'feed' } as const, [] as CrewMsg[], { shape: 'feed-1' })
-const START: CrewView = { tab: 'inbox', filter: 'all', showAll: false, collapsed: [] }
-const view = atom({ plugin: 'pi-crew', key: 'view' } as const, START, { shape: 'view-2' })
+const START: CrewView = { tab: 'inbox', filter: 'all', showAll: false, questionExpanded: false, collapsed: [] }
+const view = atom({ plugin: 'pi-crew', key: 'view' } as const, START, { shape: 'view-3' })
 const tick = atom({ plugin: 'pi-crew', key: 'tick' } as const, 0, { shape: 'tick-1' })
 const seen = atom({ plugin: 'pi-crew', key: 'seen' } as const, [] as string[], { shape: 'seen-1' })
-
-type Inbound = {
-  type: 'message'
-  from: { id: string; name?: string; cwd: string; worker?: string }
-  id: string
-  replyTo?: string
-  expectsReply: boolean
-  kind: CrewMsg['kind'] | 'idle'
-  text: string
-  checks?: { ok: boolean; notes: string[] }
-}
 
 type BridgeEvent =
   | { type: 'ready'; lead: { name: string; id: string }; workers: CrewWorker[]; feed: CrewMsg[] }
@@ -145,21 +133,7 @@ async function deliver($: Engine, ev: Inbound) {
   const worker = name ? (await read($, workers)).find(w => w.name === name) : undefined
   const peer = name ?? ev.from.name ?? ev.from.id
   const notes = name ? panelNotes.get(name) : undefined
-  const head = [
-    turnHead(worker, ev.kind, peer),
-    `intercom id ${ev.from.id}, cwd ${ev.from.cwd}, message ${ev.id}`,
-    ev.replyTo ? `in reply to ${ev.replyTo}` : '',
-    ev.kind === 'ask' ? `Answer with mcp__pi-crew__send to "${peer}" replyTo "${ev.id}".` : '',
-    ev.kind === 'idle' ? `Check it: its screen below, mcp__pi-crew__send to nudge "${peer}", or mcp__pi-crew__stop.` : '',
-  ].filter(Boolean)
-  const checks = checksLine(ev.checks)
-  const body = [
-    head.join('; '),
-    ...(checks ? [checks] : []),
-    ...(notes?.length ? [`Since its last report the user wrote to ${peer} from the crew pane: ${notes.map(n => `"${n}"`).join(', ')}`] : []),
-    '',
-    ev.text,
-  ].join('\n')
+  const body = turnText(worker, ev, notes)
   for (let n = 0; n < SUBMIT_ATTEMPTS; n++) {
     const result = await $.prompt.submit({ text: body })
     if (!result.drop) {
@@ -179,7 +153,6 @@ async function onEvent($: Engine, ev: BridgeEvent) {
   switch (ev.type) {
     case 'ready':
       attempt = 0
-      await update($, lead, () => ev.lead)
       await update($, workers, () => ev.workers)
       await update($, feed, () => ev.feed.slice(-FEED_LIMIT))
       $.ui.status(undefined)
@@ -205,14 +178,14 @@ async function onEvent($: Engine, ev: BridgeEvent) {
 const setView = ($: Engine, patch: Partial<CrewView>) => update($, view, v => ({ ...v, confirmStop: undefined, ...patch }))
 
 async function openThread($: Engine, w: CrewWorker) {
-  await setView($, { sel: w.name, showAll: false })
+  await setView($, { sel: w.name, showAll: false, questionExpanded: false })
   if (w.unread > 0 && bridgeKey) await call($, { op: 'read', name: w.name })
 }
 
 async function openPane($: Engine, patch: Partial<CrewView>, w?: CrewWorker) {
   await setView($, { sel: undefined, ...patch })
   if (w) await openThread($, w)
-  await $.ui.open({ id: PANE, title: TITLE, focus: true })
+  await $.ui.open({ id: PANE, title: TITLE, focus: true, closeOnEscape: true })
 }
 
 async function act($: Engine, request: Record<string, unknown>, what: string): Promise<boolean> {
@@ -226,6 +199,7 @@ async function act($: Engine, request: Record<string, unknown>, what: string): P
 }
 
 async function reply($: Engine, w: CrewWorker, text: string) {
+  await setView($, {})
   const t = text.trim()
   if (!t) return
   if (await act($, { op: 'send', to: w.name, text: t, replyTo: w.ask?.id }, `send to ${tag(w)}`)) {
@@ -299,7 +273,8 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'crew' }, async $ => {
-    await $.ui.open({ id: PANE, title: TITLE, focus: true })
+    await setView($, {})
+    await $.ui.open({ id: PANE, title: TITLE, focus: true, closeOnEscape: true })
     return { text: 'Crew pane opened.' }
   })
 
@@ -311,42 +286,48 @@ export const register: Register = on => {
     await read($, tick)
     const t = tally(ws)
     const q = nextQuestion(ws)
-    const sep = <Text dimColor> · </Text>
-    const head = `crew ${t.crew}${t.ask ? ` · ◆ ${t.ask} needs you` : ''} · ● ${t.work} · ○ ${t.idle}${t.gone ? ` · ✕ ${t.gone}` : ''}${t.unread ? ` · ${UNREAD} ${t.unread} new` : ''} · ? `
-    const room = Math.max(8, e.props.bodyColumns - head.length)
+    const now = await $.clock.now()
+    const cols = e.props.bodyColumns
+    // Budgets use UTF-16 length, not terminal cells; wide CJK/emoji can still misfit.
+    const crewHotkey = cols >= 3 ? 'c' : undefined
+    const crewLabel = clip(`crew ${t.crew}`, Math.max(0, cols - (crewHotkey ? 3 : 0)))
+    const crewWidth = crewLabel.length + (crewHotkey ? 3 : 0)
+    const separator = cols >= crewWidth + 3 + 3 + (q ? String(q.n).length + 2 : 0) ? ' · ' : ' '
+    const questionOverhead = q ? separator.length + 3 : 0
+    const questionFloor = q ? `${t.ask > 1 ? `${GLYPH.ask}${t.ask} · ` : `${GLYPH.ask} `}${q.n}` : ''
+    const questionFull = q ? bandQuestion(q, t.ask, now, Number.MAX_SAFE_INTEGER) : ''
+    let remaining = Math.max(0, cols - crewWidth - questionOverhead)
+    const chips = [
+      { key: 'unread', count: t.unread, glyph: UNREAD, word: 'new', hotkey: 'u', tab: 'inbox' as const, filter: 'all' as const },
+      { key: 'work', count: t.work, glyph: GLYPH.work, word: LABEL.work, tab: 'crew' as const, filter: 'work' as const },
+      { key: 'idle', count: t.idle, glyph: GLYPH.idle, word: LABEL.idle, tab: 'crew' as const, filter: 'idle' as const },
+      { key: 'gone', count: t.gone, glyph: GLYPH.gone, word: LABEL.gone, tab: 'crew' as const, filter: 'gone' as const },
+    ].filter(c => c.count > 0)
+    const visible = chips.flatMap(c => {
+      // Protect question identity and unread first; secondary counts cannot shorten the question.
+      const reserve = q ? c.key === 'unread' ? questionFloor.length : questionFull.length : 0
+      const overhead = separator.length + (c.hotkey ? 3 : 0)
+      const full = `${c.glyph} ${c.count} ${c.word}`
+      const compact = `${c.glyph}${c.count}`
+      const label = full.length + overhead + reserve <= remaining ? full : compact.length + overhead + reserve <= remaining ? compact : ''
+      if (!label) return []
+      remaining -= label.length + overhead
+      return [{ ...c, label }]
+    })
+    const question = q ? bandQuestion(q, t.ask, now, remaining) : ''
     return (
-      <Box flexDirection="row">
-        <Button plain key="crew" onPress={() => openPane($, { tab: 'crew', filter: 'all' })}>
-          <Text bold>crew</Text> {String(t.crew)}
-        </Button>
-        {t.ask > 0 && sep}
-        {t.ask > 0 && (
-          <Button plain key="ask" onPress={() => openPane($, { tab: 'inbox', filter: 'ask' }, q)}>
-            <Text color={COLOR.ask}>{`${GLYPH.ask} ${t.ask} needs you`}</Text>
+      <Box flexDirection="row" flexWrap="nowrap">
+        <Button plain hotkey={crewHotkey} key="crew" label={crewLabel} onPress={() => openPane($, { tab: 'crew', filter: 'all' })} />
+        {q?.ask && question && <Text dimColor>{separator}</Text>}
+        {q?.ask && question && <Button plain hotkey="a" key="next" label="answer oldest question" onPress={() => openPane($, { tab: 'inbox', filter: 'ask' }, q)}>
+          <Text color={COLOR.ask}>{question}</Text>
+        </Button>}
+        {visible.map(c => <Box key={c.key} flexDirection="row">
+          <Text dimColor>{separator}</Text>
+          <Button plain hotkey={c.hotkey} key={c.key} label={c.label} onPress={() => openPane($, { tab: c.tab, filter: c.filter })}>
+            <Text color={c.key === 'work' ? COLOR.work : c.key === 'unread' ? 'cyan' : undefined} dimColor={c.key === 'gone'}>{c.label}</Text>
           </Button>
-        )}
-        {sep}
-        <Button plain key="work" onPress={() => openPane($, { tab: 'crew', filter: 'work' })}>
-          <Text color={COLOR.work}>{`${GLYPH.work} ${t.work}`}</Text>
-        </Button>
-        {sep}
-        <Button plain key="idle" onPress={() => openPane($, { tab: 'crew', filter: 'idle' })}>{`${GLYPH.idle} ${t.idle}`}</Button>
-        {t.gone > 0 && sep}
-        {t.gone > 0 && (
-          <Button plain dimColor key="gone" onPress={() => openPane($, { tab: 'crew', filter: 'gone' })}>{`${GLYPH.gone} ${t.gone}`}</Button>
-        )}
-        {t.unread > 0 && sep}
-        {t.unread > 0 && (
-          <Button plain key="unread" onPress={() => openPane($, { tab: 'inbox', filter: 'all' })}>
-            <Text color="cyan">{`${UNREAD} ${t.unread} new`}</Text>
-          </Button>
-        )}
-        {q?.ask && sep}
-        {q?.ask && (
-          <Button plain dimColor key="next" onPress={() => openPane($, { tab: 'inbox', filter: 'ask' }, q)}>
-            {clip(`? ${tag(q)}: ${oneLine(q.ask.text)}`, room)}
-          </Button>
-        )}
+        </Box>)}
       </Box>
     )
   })
@@ -356,25 +337,40 @@ export const register: Register = on => {
     const v = await read($, view)
     const ws = await read($, workers)
     const fd = await read($, feed)
-    const me = await read($, lead)
     await read($, tick)
     const now = await $.clock.now()
-    const cols = Math.max(24, e.props.bodyColumns)
+    const cols = Math.max(1, e.props.bodyColumns)
     const narrow = e.props.placement === 'inline' || cols < 60
     const t = tally(ws)
-    const tagWidth = Math.min(18, Math.max(5, ...ws.map(w => tag(w).length)))
+    const tagWidth = Math.min(18, Math.floor(cols * 0.4), Math.max(5, ...ws.map(w => tag(w).length)))
 
     const glyph = (w: CrewWorker) => <Text color={COLOR[w.state]}>{GLYPH[w.state]}</Text>
 
+    const close = async () => {
+      await setView($, {})
+      await $.ui.close({ id: PANE })
+    }
+    const dismiss = <Button plain hotkey="x" key="close" role="dismiss" label="×" onPress={close} />
+    const closeHint = <Button plain dimColor hotkey="q" key="quit" label="close" onPress={close} />
+    let firstRow = true
     const row = (w: CrewWorker, indent = '') => {
       const preview = oneLine(w.state === 'ask' && w.ask ? w.ask.text : (w.last?.text ?? LABEL[w.state]))
-      const fixed = indent.length + 2 + tagWidth + 1 + 4 + (w.unread ? 4 : 0) + 1
+      indent = clip(indent, Math.max(0, cols - 2))
+      const prefix = clip(`${indent}${GLYPH[w.state]} `, cols)
+      const unread = w.unread ? clip(` ${UNREAD}${Math.min(w.unread, 99)}`, Math.max(0, cols - prefix.length)) : ''
+      const nameWidth = Math.min(tagWidth, Math.max(0, cols - prefix.length - unread.length))
+      const name = clip(tag(w), nameWidth).padEnd(nameWidth)
+      let room = cols - prefix.length - name.length - unread.length
+      const time = room >= 5 ? ` ${clip(age(w.lastAt, now), 4).padStart(4)}` : ''
+      room -= time.length
+      const excerpt = room >= 5 ? ` ${clip(preview, room - 1)}` : ''
+      const autoFocus = firstRow ? true : undefined
+      firstRow = false
       return (
-        <Button plain key={`w-${w.name}`} label={`${tag(w)} ${LABEL[w.state]}`} onPress={() => openThread($, w)}>
-          {indent}
-          {glyph(w)} {tag(w).padEnd(tagWidth)} <Text dimColor>{age(w.lastAt, now).padStart(4)}</Text>
-          {w.unread ? <Text color="cyan">{` ${UNREAD}${Math.min(w.unread, 99)}`}</Text> : ''}{' '}
-          <Text dimColor={w.state !== 'ask'}>{clip(preview, cols - fixed)}</Text>
+        <Button plain autoFocus={autoFocus} key={`w-${w.name}`} label={`${tag(w)} ${LABEL[w.state]}`} onPress={() => openThread($, w)}>
+          <Text color={COLOR[w.state]}>{prefix}</Text>{name}<Text dimColor>{time}</Text>
+          <Text color="cyan">{unread}</Text>
+          <Text dimColor={w.state !== 'ask'}>{excerpt}</Text>
         </Button>
       )
     }
@@ -384,7 +380,8 @@ export const register: Register = on => {
       if (!w) {
         return (
           <Box flexDirection="column">
-            <Button plain hotkey="b" key="back" label="back" onPress={() => setView($, { sel: undefined })} />
+            <Box flexDirection="row" justifyContent="space-between"><Button plain hotkey="b" key="back" label="back" onPress={() => setView($, { sel: undefined })} />{dismiss}</Box>
+            {closeHint}
             <Text dimColor>{`No worker named ${v.sel}.`}</Text>
           </Box>
         )
@@ -392,51 +389,49 @@ export const register: Register = on => {
       const msgs = threadOf(fd, w.name)
       const { hidden, shown } = fold(msgs, v.showAll ? RECENT_MORE : RECENT)
       const bodyLines = v.showAll ? 8 : 3
+      const question = w.ask ? clampText(w.ask.text, narrow ? 4 : 8, Math.max(1, cols - 4)) : undefined
       const confirming = v.confirmStop === w.name
       return (
         <Box flexDirection="column">
           <Box flexDirection="row" justifyContent="space-between">
-            <Box flexDirection="row">
-              <Button plain hotkey="b" key="back" label="back" onPress={() => setView($, { sel: undefined })} />
-              <Text> </Text>
-              {glyph(w)}
-              <Text bold>{` ${tag(w)}`}</Text>
-              <Text dimColor>{`${w.group ? ` · ${w.group}` : ''} · ${LABEL[w.state]} · ${age(w.startedAt, now)}`}</Text>
-            </Box>
-            <Box flexDirection="row">
-              {w.agtermSession && (
-                <Button plain hotkey="o" key="open" label="open pane" onPress={() => act($, { op: 'focus', name: w.name }, `open ${tag(w)}`)} />
-              )}
-              <Text> </Text>
-              <Button
-                plain
-                hotkey="s"
-                key="stop"
-                label={confirming ? (w.state === 'gone' ? 'forget? press s' : 'stop? press s') : w.state === 'gone' ? 'forget' : 'stop'}
-                onPress={async () => {
-                  if (!confirming) return update($, view, x => ({ ...x, confirmStop: w.name }))
-                  const forgetting = w.state === 'gone'
-                  if (await act($, { op: 'stop', name: w.name }, `stop ${tag(w)}`)) await setView($, forgetting ? { sel: undefined } : {})
-                }}
-              />
-            </Box>
+            <Button plain hotkey="b" key="back" label="back" onPress={() => setView($, { sel: undefined })} />
+            {dismiss}
           </Box>
+          <Box flexDirection="row" flexWrap="wrap">
+            {w.agtermSession && <Button plain hotkey="o" key="open" label="worker terminal" onPress={async () => {
+              await setView($, {})
+              await act($, { op: 'focus', name: w.name }, `open ${tag(w)}`)
+            }} />}
+            <Text> </Text>
+            <Button plain hotkey="s" key="stop" label={w.state === 'gone' ? 'forget' : 'stop'} onPress={() => setView($, { confirmStop: confirming ? undefined : w.name })} />
+          </Box>
+          {confirming && <Box flexDirection="row" flexWrap="wrap">
+            <Text>{w.state === 'gone' ? `forget ${tag(w)}? removes its record  ` : `stop ${tag(w)}? its session closes and current work ends  `}</Text>
+            <Button plain hotkey="c" key="confirm" label="confirm" onPress={async () => {
+              await setView($, {})
+              if (await act($, { op: 'stop', name: w.name }, `stop ${tag(w)}`)) await setView($, w.state === 'gone' ? { sel: undefined } : {})
+            }} />
+            <Text> </Text><Button plain hotkey="v" key="cancel" label="cancel" onPress={() => setView($, {})} />
+          </Box>}
+          <Text>{glyph(w)}<Text bold>{` ${clip(tag(w), narrow ? Math.max(8, cols - 4) : cols)}`}</Text></Text>
+          <Text dimColor>{clip(`${w.group ? `${w.group} · ` : ''}${LABEL[w.state]} · ${age(w.startedAt, now)}`, cols)}</Text>
           <Text dimColor>{clip(`${w.cwd} · ${w.model} · last ${age(w.lastAt, now)}${w.unread ? ` · ${UNREAD} ${w.unread} new` : ''}`, cols)}</Text>
           {w.ask && (
             <Box flexDirection="column" borderStyle="round" borderColor={COLOR.ask} paddingX={1} marginTop={1}>
               <Text color={COLOR.ask} bold>{`${GLYPH.ask} question · ${age(w.ask.at, now)}`}</Text>
-              <Text>{clampText(w.ask.text, narrow ? 4 : 8, cols - 4).text}</Text>
-              <Box flexDirection="row">
-                <Button plain hotkey="y" key="yes" label="yes" onPress={() => reply($, w, 'yes')} />
+              <Text>{v.questionExpanded ? w.ask.text : `${question?.text}${question?.more ? ' …' : ''}`}</Text>
+              {question?.more && <Button plain hotkey="d" key="question-expand" label={v.questionExpanded ? 'collapse question' : 'full question'} onPress={() => setView($, { questionExpanded: !v.questionExpanded })} />}
+              <Box flexDirection="row" flexWrap="wrap">
+                <Button plain hotkey="y" key="yes" label="send yes" onPress={() => reply($, w, 'yes')} />
                 <Text>  </Text>
-                <Button plain hotkey="n" key="no" label="no" onPress={() => reply($, w, 'no')} />
+                <Button plain hotkey="n" key="no" label="send no" onPress={() => reply($, w, 'no')} />
                 <Text dimColor>  or type an answer below</Text>
               </Box>
             </Box>
           )}
           <Box flexDirection="column" marginTop={1}>
             {msgs.length === 0 && <Text dimColor>No messages yet.</Text>}
-            {msgs.length > 0 && <Box flexDirection="row">
+            {msgs.length > 0 && <Box flexDirection="row" flexWrap="wrap">
               <Text dimColor>{`latest ${shown.length}${hidden ? ` of ${msgs.length}` : ''} · full text in the transcript  `}</Text>
               {(hidden > 0 || v.showAll) && (
                 <Button plain dimColor hotkey="e" key="more" label={v.showAll ? 'less' : 'more'} onPress={() => setView($, { showAll: !v.showAll })} />
@@ -448,7 +443,7 @@ export const register: Register = on => {
               return (
                 <Box key={m.id} flexDirection="column" marginBottom={1}>
                   <Text>
-                    {mine ? <Text color="blue">you</Text> : <Text color={m.kind === 'ask' ? COLOR.ask : COLOR.work}>{`${m.kind === 'ask' ? GLYPH.ask : m.kind === 'done' ? GLYPH.idle : GLYPH.work} ${w.name}`}</Text>}
+                    {mine ? <Text color="blue">you</Text> : <Text color={m.kind === 'ask' ? COLOR.ask : m.kind === 'done' ? COLOR.idle : COLOR.work}>{`${m.kind === 'ask' ? GLYPH.ask : m.kind === 'done' ? GLYPH.idle : GLYPH.work} ${w.name}`}</Text>}
                     <Text dimColor>{`  ${age(m.at, now)}${m.kind === 'done' ? ' · done' : ''}`}</Text>
                   </Text>
                   <Text dimColor={mine}>{`  ${body.text.replace(/\n/g, '\n  ')}${body.more ? ' …' : ''}`}</Text>
@@ -457,8 +452,9 @@ export const register: Register = on => {
             })}
           </Box>
           {w.state !== 'gone' && (
-            <Input key={`reply-${w.name}`} placeholder={`message ${tag(w)}`} rows={2} onSubmit={value => reply($, w, value)} />
+            <Input key={`reply-${w.name}`} placeholder={`message ${tag(w)} · Enter sends`} submitLabel="send" rows={2} onInput={async () => { if (v.confirmStop) await setView($, {}) }} onSubmit={value => reply($, w, value)} />
           )}
+          <Box flexDirection="row" flexWrap="wrap"><Text dimColor>{`b back${hidden > 0 || v.showAll ? ' · e more' : ''}${w.agtermSession ? ' · o terminal' : ''}${w.ask ? `${question?.more ? ` · d ${v.questionExpanded ? 'collapse' : 'full'} question` : ''} · y/n send` : ''} · s ${w.state === 'gone' ? 'forget' : 'stop'} · Tab move · Enter activate · Esc/`}</Text>{closeHint}</Box>
         </Box>
       )
     }
@@ -468,11 +464,11 @@ export const register: Register = on => {
       ['crew', '2', `Crew ${t.crew}`],
     ]
     const filters: Array<[CrewFilter, string, string]> = [
-      ['all', 'a', 'all'],
-      ['ask', 'q', `${GLYPH.ask} ${t.ask}`],
-      ['work', 'w', `${GLYPH.work} ${t.work}`],
-      ['idle', 'i', `${GLYPH.idle} ${t.idle}`],
-      ['gone', 'x', `${GLYPH.gone} ${t.gone}`],
+      ['all', 'a', `all ${ws.length}`],
+      ['ask', 'n', `${GLYPH.ask} needs you ${t.ask}`],
+      ['work', 'w', `${GLYPH.work} working ${t.work}`],
+      ['idle', 'i', `${GLYPH.idle} idle ${t.idle}`],
+      ['gone', 's', `${GLYPH.gone} stopped ${t.gone}`],
     ]
     const shown = ws.filter(w => matches(w, v.filter))
 
@@ -521,7 +517,7 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column">
-        <Box flexDirection="row" flexWrap="wrap">
+        <Box flexDirection="row" justifyContent="space-between"><Box flexDirection="row" flexWrap="wrap">
           {tabs.map(([id, key, label]) => (
             <Box key={`tab-${id}`} marginRight={2}>
               <Button plain hotkey={key} key={`tab-${id}`} label={label} onPress={() => setView($, { tab: id })}>
@@ -529,7 +525,7 @@ export const register: Register = on => {
               </Button>
             </Box>
           ))}
-        </Box>
+        </Box>{dismiss}</Box>
         <Box flexDirection="row" flexWrap="wrap" marginBottom={1}>
           {filters.map(([id, key, label]) => (
             <Box key={`f-${id}`} marginRight={1}>
@@ -540,7 +536,7 @@ export const register: Register = on => {
           ))}
         </Box>
         {body()}
-        {!narrow && me && <Text dimColor>{clip(`lead ${me.name} · ${me.id}`, cols)}</Text>}
+        <Box flexDirection="row" flexWrap="wrap"><Text dimColor>1/2 tabs · a n w i s filter · Tab move · Enter activate · Esc/</Text>{closeHint}</Box>
       </Box>
     )
   })

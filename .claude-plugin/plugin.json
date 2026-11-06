@@ -1,6 +1,6 @@
 {
   "name": "pi-crew",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Lead a crew of Pi workers in agterm over pi-intercom: spawn, message, and get woken by their reports.",
   "types": "./types/index.d.ts",
   "author": {

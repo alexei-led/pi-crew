@@ -22,7 +22,8 @@ export function age(at: number, now: number): string {
 export const oneLine = (text: string) => text.replace(/\s+/g, ' ').trim()
 
 export function clip(text: string, max: number): string {
-  if (max <= 1) return text ? '…' : ''
+  if (max <= 0) return ''
+  if (max === 1) return text.length <= 1 ? text : '…'
   return text.length > max ? `${text.slice(0, max - 1)}…` : text
 }
 
@@ -102,4 +103,53 @@ export function turnHead(w: CrewWorker | undefined, kind: CrewMsg['kind'] | 'idl
   if (kind === 'idle') return `${IDLE_GLYPH} Worker ${tag(w)} is idle without a report`
   const verb = kind === 'ask' ? 'asks' : kind === 'done' ? 'reports done' : 'reports'
   return `${kind === 'ask' ? GLYPH.ask : kind === 'done' ? GLYPH.idle : GLYPH.work} Worker ${tag(w)} ${verb}`
+}
+
+export type Inbound = {
+  type: 'message'
+  from: { id: string; name?: string; cwd: string; worker?: string }
+  id: string
+  replyTo?: string
+  expectsReply: boolean
+  kind: CrewMsg['kind'] | 'idle'
+  text: string
+  checks?: { ok: boolean; notes: string[] }
+}
+
+/** Human-readable turn: the headline stays searchable independently of transport metadata. */
+export function turnText(worker: CrewWorker | undefined, ev: Inbound, notes?: string[]): string {
+  const peer = ev.from.worker ?? ev.from.name ?? ev.from.id
+  const checks = checksLine(ev.checks)
+  return [
+    turnHead(worker, ev.kind, peer),
+    ...(ev.kind === 'ask' ? [`Answer with mcp__pi-crew__send to "${peer}" replyTo "${ev.id}".`] : []),
+    ...(ev.kind === 'idle' ? [`Check it: its screen below, mcp__pi-crew__send to nudge "${peer}", or mcp__pi-crew__stop.`] : []),
+    `intercom id ${ev.from.id}, cwd ${ev.from.cwd}, message ${ev.id}${ev.replyTo ? `, in reply to ${ev.replyTo}` : ''}`,
+    ...(checks ? [checks] : []),
+    ...(notes?.length ? [`Since its last report the user wrote to ${peer} from the crew pane: ${notes.map(n => `"${n}"`).join(', ')}`] : []),
+    '',
+    ev.text,
+  ].join('\n')
+}
+
+
+/** Fit the identity before the preview, sacrificing the name before question text. */
+export function bandQuestion(w: CrewWorker, count: number, now: number, width: number): string {
+  if (!w.ask || width <= 0) return ''
+  const fullPrefix = count > 1 ? `${GLYPH.ask} ${count} asks · ` : `${GLYPH.ask} `
+  const compactPrefix = count > 1 ? `${GLYPH.ask}${count} · ` : `${GLYPH.ask} `
+  const suffix = ` ${age(w.ask.at, now)}: ${oneLine(w.ask.text)}`
+  const prefix = fullPrefix.length + String(w.n).length + 2 + ` ${age(w.ask.at, now)}: `.length + 1 <= width ? fullPrefix : compactPrefix
+  const identity = `${prefix}${w.n}`
+  if (identity.length > width) return clip(count > 1 ? `${GLYPH.ask}${count}` : `${GLYPH.ask}${w.n}`, width)
+  const nameWidth = Math.max(1, Math.min(w.name.length, width - identity.length - 1 - suffix.length))
+  const name = clip(w.name, nameWidth)
+  const label = `${identity}${name ? ` ${name}` : ''}${suffix}`
+  if (label.length <= width) return label
+  // If even the age and preview cannot fit, retain as much worker identity as possible.
+  if (identity.length + ` ${age(w.ask.at, now)}: `.length + 1 > width) {
+    // Never let the name clip eat the worker number the band reserved room for.
+    return width < identity.length + 2 ? identity : clip(`${identity} ${w.name}`, width)
+  }
+  return clip(label, width)
 }

@@ -35,8 +35,9 @@ Ask Claude in plain words; the bundled skill tells it how to lead:
 Each worker opens in a new agterm session next to Claude's, gets a brief naming its lead, and starts on its task. When it reports, Claude gets a new turn:
 
 ```
-◆ Worker 1 api asks; intercom id …; message 7f3c…
+◆ Worker 1 api asks
 Answer with mcp__pi-crew__send to "api" replyTo "7f3c…".
+intercom id …, cwd …, message 7f3c…
 
 Should /health check the database too?
 ```
@@ -56,12 +57,15 @@ rc: 0
 logs: none
 ```
 
-The turn then says `DONE checks passed`, or `DONE checks failed:` with what is wrong: a missing field, a non-zero `rc`, a HEAD or branch that differs from the claim, uncommitted changes, work on the default branch, or uncommitted changes in the main checkout when the worker runs in a linked worktree (edits that escaped it). The checks prove the claims, not the work: review the diff before you merge.
+If the task changes files, the worker commits first. A task that changes nothing reports the current HEAD and the checks actually run with their rc. Use `tests: none` only if no checks ran. Progress reports are allowed and the worker keeps working after them. Each finished task or question gets exactly one final send, then the worker waits.
+
+The turn then says `DONE checks passed`, or `DONE checks failed:` with what is wrong: a missing field, a non-zero `rc`, a HEAD or branch that differs from the claim, uncommitted changes, work on the default branch (unless spawned with `allowDefaultBranch: true`), or uncommitted changes in the main checkout when the worker runs in a linked worktree (edits that escaped it). The checks prove the claims, not the work: review the diff before you merge.
 
 A worker on a task that sits idle on intercom, or drops off it, for 10 minutes with no message wakes Claude once, with the last 15 lines of its screen:
 
 ```
-◇ Worker 2 slimdown is idle without a report; …
+◇ Worker 2 slimdown is idle without a report
+intercom id …, cwd …, message …
 idle on intercom for 12m, last message 40m ago, with no Q: or DONE:.
 ```
 
@@ -72,44 +76,69 @@ It alerts again only after the worker sends a message or gets busy and goes idle
 The band above the prompt shows the crew at a glance. Click a part to open the pane there:
 
 ```
-crew 3 · ◆ 1 needs you · ● 1 · ○ 1 · ✉ 2 new · ? 1 api: Should /health check the database too?
+c: crew 3 · a: ◆ 1 api 4m: Should /health check the database too? · u: ✉ 2 new · ● 1 working · ○ 1 idle
 ```
+
+Zero counts are hidden. The band prioritizes crew, question, unread, working, idle, then stopped. Each count uses words when they fit, then compact form (`●1`), then hides. The question clips the worker name before its text. The question stays at normal contrast in yellow and opens its worker’s thread. With several open questions, it shows their count before the oldest worker (`◆ 2 asks · 1 api 4m: …`, or `◆2 · 1 api…` when tight). Working is green, unread is cyan, and stopped is dim; glyphs and words carry the same meaning without color.
 
 `/crew` opens the pane: who needs you, what each worker is doing, and its latest few messages. Claude Code places it: docked beside the transcript in the fullscreen layout from 110 columns, otherwise inline above the prompt. The main-screen layout (`CLAUDE_CODE_NO_FLICKER=0`, and tmux by default) always places it inline.
 
 ```
- Inbox ✉2 ◆1   Crew 3
- [all] ◆ 1  ● 1  ○ 1  ✕ 0
+ 1: Inbox ✉2 ◆1   2: Crew 3                              x: ×
+ a: [all 3]  n: ◆ needs you 1  w: ● working 1
+ i: ○ idle 1  s: ✕ stopped 0
 
  ◆ 1 api    2m ✉1 Should /health check the database too?
  ● 2 web   now ✉1 status page wired, tests running
  ○ 3 docs  40m    README updated
+
+ 1/2 tabs · a n w i s filter · Tab move · Enter activate · Esc/q: close
 ```
 
 Select a worker for its detail:
 
 ```
- back  ● 2 web · app · working · 12m                    open pane  stop
+ b: back                                                x: ×
+ o: worker terminal  s: stop
+ ● 2 web
+ app · working · 12m
  ~/src/app/web · router/openai-work · last now · ✉ 1 new
 
- latest 3 of 8 · full text in the transcript  more
+ latest 3 of 8 · full text in the transcript  e: more
  you  3m
    use the shared Badge component
  ● web  now
    status page wired, tests running
 
- ┌ message 2 web ───────────────────────────────────────────────────┐
+ ┌ message 2 web · Enter sends ──────────────────────────────┐
+ b back · e more · o terminal · s stop · Tab move · Enter activate · Esc/q: close
 ```
 
 | Glyph | State |
 | --- | --- |
 | `◆` | asked a question, waiting for you |
 | `●` | working |
-| `○` | done or idle |
+| `○` | done or idle (neutral, not working green) |
 | `✕` | stopped |
-| `✉` | unread messages |
+| `✉` | unread messages (`new` in the band) |
+| `◇` | bridge alert: idle on a task without a report |
 
-Keys in the pane: `1` `2` tabs, `a` `q` `w` `i` `x` filters, `b` back, `y` `n` quick answers, `e` more messages, `o` open the worker's agterm session, `s` stop (press twice). Type in the box at the bottom to message the worker; Claude hears about it with the worker's next report.
+### Keys and mouse
+
+Click any chip, row or action. With the band focused (`ctrl+x tab`), `c` opens Crew, `a` answers the oldest question, and `u` opens the inbox when unread is shown.
+
+In the pane:
+
+- `q`, `x` or `Esc`: close. The top-right `×` also closes.
+- `1` / `2`: Inbox / Crew. `a` / `n` / `w` / `i` / `s`: all / needs you / working / idle / stopped.
+- Tab moves focus; Enter activates the focused control. The first visible worker starts focused.
+- Detail: `b` back (keeps tab/filter), `e` more/less messages, `d` expand/collapse a cut question, `o` worker terminal.
+- `y` / `n`: send yes / send no. Type in the message field and press Enter to send; Claude hears about it with the worker's next report.
+- Detail `s` arms stop (or forget for a stopped worker); `c` confirms. Stopping closes the session and ends current work. The cancel button (`v`) or another action disarms it. Confirmation never takes focus automatically.
+
+Shortcuts do not apply while the message box has focus: keys type text, Enter sends, and Esc closes the pane.
+
+Long worker names are clipped in narrow lists; detail actions stay on separate lines from the worker identity.
 
 ## Tools
 

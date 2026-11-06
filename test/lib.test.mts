@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import {
-  WORKER_NAME, appendLine, prune, applyIn, applyOut, classify, defaultBranch, idleDue, idleMs, launchScript, nextNumber, parseDone,
+  ASK_LIMIT, PREVIEW_LIMIT, WORKER_NAME, appendLine, prune, applyIn, applyOut, classify, defaultBranch, idleDue, idleMs, launchScript, nextNumber, parseDone,
   parseSessionId, readLines, resolveTarget, stableId, trackLive, upgrade, verifyDone, workerBrief, type Git, type Msg, type Worker,
 } from "../bridge/lib.mts";
 
@@ -30,6 +30,12 @@ test("workerBrief names the lead id and carries the task", () => {
   const worker = base;
   const brief = workerBrief({ name: "lead", id: "LEAD-ID" }, worker, "do the thing");
   assert.match(brief, /to: "LEAD-ID"/);
+  assert.match(brief, /if you changed files, commit first/);
+  assert.match(brief, /changes nothing reports the current HEAD/);
+  assert.match(brief, /Report the checks you actually ran and their rc; use `tests: none` only if you ran none/);
+  assert.match(brief, /After a Q:, DONE: or blocker send, stop and wait/);
+  assert.match(brief, /After a progress report, keep working/);
+  assert.match(brief, /Progress reports are allowed/);
   assert.match(brief, /First task:\ndo the thing$/);
   assert.match(brief, /working directory is \/x\. Run every command there/);
   for (const field of ["head", "branch", "tests", "rc", "logs"]) assert.match(brief, new RegExp(`^ +${field}: <`, "m"), field);
@@ -72,6 +78,14 @@ test("classify reads the Q:/DONE: markers, an intercom ask and a trailing questi
     ["  Q:   spaced  ", false, "ask", "spaced"],
   ];
   for (const [text, expects, kind, out] of cases) assert.deepEqual(classify(text, expects), { kind, text: out }, text);
+});
+
+test("an open question keeps far more than the preview, up to its own limit", () => {
+  const long = "q".repeat(PREVIEW_LIMIT * 3);
+  const w = applyIn(base, msg("ask", long));
+  assert.equal(w.ask?.text, long);
+  assert.equal(w.last?.text.length, PREVIEW_LIMIT);
+  assert.equal(applyIn(base, msg("ask", "q".repeat(ASK_LIMIT + 50))).ask?.text.length, ASK_LIMIT);
 });
 
 test("worker state: ask opens and stays open until the lead answers; done goes idle; gone stays gone", () => {
@@ -250,6 +264,11 @@ test("verifyDone checks the claims against the checkout", async () => {
     `main checkout ${main} has uncommitted changes`,
   ]);
   assert.deepEqual((await verifyDone({ ...good, branch: "main" }, main, realGit)).notes, ["on the default branch main", `uncommitted changes in ${main}: 1 path(s)`]);
+
+  assert.deepEqual((await verifyDone({ ...good, branch: "main" }, main, realGit, true)).notes, [`uncommitted changes in ${main}: 1 path(s)`]);
+  assert.deepEqual((await verifyDone({ ...good, branch: "wrong", head: "bad", rc: "1" }, main, realGit, true)).notes, [
+    "reported rc=1", `head bad is not HEAD ${head.slice(0, 12)}`, "branch wrong is not the checked-out main", `uncommitted changes in ${main}: 1 path(s)`,
+  ]);
 
   const none = mkdtempSync(join(tmpdir(), "pi-crew-nogit-"));
   assert.deepEqual(await verifyDone(good, none, realGit), { ok: false, notes: [`${none} is not a git checkout; head and branch unchecked`] });

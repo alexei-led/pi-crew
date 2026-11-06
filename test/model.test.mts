@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
-import { age, checksLine, clampText, clip, fold, groups, inboxOrder, nextQuestion, tally, turnHead } from "../hooks/model.ts";
+import { age, bandQuestion, checksLine, clampText, clip, fold, groups, inboxOrder, nextQuestion, tally, turnHead, turnText } from "../hooks/model.ts";
 import type { CrewWorker } from "../types/index.d.ts";
 
 const w = (name: string, n: number, more: Partial<CrewWorker> = {}): CrewWorker => ({
@@ -48,6 +48,22 @@ test("clampText wraps long lines and cuts at the line budget", () => {
   assert.deepEqual(clampText("a\n\nb", 3, 4), { text: "a\n\nb", more: false });
   assert.equal(clip("hello", 3), "he…");
   assert.equal(clip("hi", 3), "hi");
+  assert.equal(clip("hello", 0), "");
+  assert.equal(clip("hello", -1), "");
+});
+
+test("clip at width 1 keeps a one-character text and marks anything longer", () => {
+  assert.equal(clip("x", 1), "x");
+  assert.equal(clip("xy", 1), "…");
+  assert.equal(clip("", 1), "");
+});
+
+test("bandQuestion keeps the worker number when only the identity fits", () => {
+  const api = w("api", 1, { state: "ask", ask: { id: "q", at: 0, text: "Use Postgres?" } });
+  assert.equal(bandQuestion(api, 1, 0, 3), "◆ 1");
+  assert.equal(bandQuestion(api, 2, 0, 6), "◆2 · 1");
+  assert.equal(bandQuestion(api, 1, 0, 2), "◆1");
+  assert.equal(bandQuestion(w("x", 1, { state: "ask", ask: { id: "q", at: 0, text: "go?" } }), 1, 0, 120), "◆ 1 x now: go?");
 });
 
 test("turnHead uses the same glyph, number and name as the pane", () => {
@@ -66,4 +82,29 @@ test("checksLine passes a verified DONE on and marks a failed one unverified", (
     checksLine({ ok: false, notes: ["missing rc", "uncommitted changes in /w: 2 path(s)"] }),
     "DONE checks failed: missing rc; uncommitted changes in /w: 2 path(s). Treat the report as unverified.",
   );
+});
+
+
+test("turn text puts the headline, answer instruction and metadata on separate lines", () => {
+  const event = { type: "message" as const, kind: "ask" as const, id: "q1", expectsReply: true, from: { id: "session", cwd: "/w", worker: "api" }, text: "Question?" };
+  assert.deepEqual(turnText(w("api", 3), event).split("\n"), [
+    "◆ Worker 3 api asks",
+    'Answer with mcp__pi-crew__send to "api" replyTo "q1".',
+    "intercom id session, cwd /w, message q1", "", "Question?",
+  ]);
+  const done = turnText(w("api", 3), { ...event, kind: "done", checks: { ok: true, notes: [] }, replyTo: "task" }, ["ship it"]).split("\n");
+  assert.equal(done[0], "○ Worker 3 api reports done");
+  assert.equal(done[1], "intercom id session, cwd /w, message q1, in reply to task");
+  assert.match(done[2]!, /^DONE checks passed:/);
+  assert.match(done[3]!, /user wrote to api.*"ship it"/);
+  assert.deepEqual(done.slice(4), ["", "Question?"]);
+});
+
+
+test("idle turn instruction follows the headline before metadata", () => {
+  const lines = turnText(w("api", 3), { type: "message", kind: "idle", id: "idle", expectsReply: false, from: { id: "session", cwd: "/w", worker: "api" }, text: "screen" }).split("\n");
+  assert.equal(lines[0], "◇ Worker 3 api is idle without a report");
+  assert.equal(lines[1], 'Check it: its screen below, mcp__pi-crew__send to nudge "api", or mcp__pi-crew__stop.');
+  assert.equal(lines[2], "intercom id session, cwd /w, message idle");
+  assert.deepEqual(lines.slice(3), ["", "screen"]);
 });

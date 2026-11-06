@@ -9,6 +9,7 @@ export type CrewWorker = {
   id: string
   cwd: string
   model: string
+  allowDefaultBranch?: boolean
   agtermSession?: string
   n: number
   group?: string
@@ -33,17 +34,16 @@ export type CrewMsg = {
   replyTo?: string
 }
 
-export type CrewLead = { name: string; id: string } | null
-
 export type CrewFilter = 'all' | CrewState
 export type CrewTab = 'inbox' | 'crew'
 
-/** What the pane shows. `sel` is the worker whose detail fills the pane; `showAll` widens its latest messages. */
+/** What the pane shows. `sel` is the worker whose detail fills the pane; `showAll` widens its latest messages; `questionExpanded` shows the full question. */
 export type CrewView = {
   tab: CrewTab
   filter: CrewFilter
   sel?: string
   showAll: boolean
+  questionExpanded: boolean
   collapsed: string[]
   confirmStop?: string
 }
@@ -51,7 +51,6 @@ export type CrewView = {
 declare module 'claude-code' {
   interface PluginState {
     'pi-crew': {
-      lead: Shaped<CrewLead>
       workers: Shaped<CrewWorker[]>
       feed: Shaped<CrewMsg[]>
       view: Shaped<CrewView>

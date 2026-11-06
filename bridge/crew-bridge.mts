@@ -191,7 +191,7 @@ async function serve(key: string, leadName: string) {
         const w = event.from.worker ? workers.get(event.from.worker) : undefined;
         if (w && event.kind === "done" && !event.checks) {
           const { text } = classify(event.text);
-          event = { ...event, checks: await verifyDone(parseDone(text), w.cwd, git) };
+          event = { ...event, checks: await verifyDone(parseDone(text), w.cwd, git, w.allowDefaultBranch) };
           if (inbox.has(event.id)) {
             inbox.set(event.id, event);
             saveInbox();
@@ -418,6 +418,7 @@ async function serve(key: string, leadName: string) {
             id: stableId("pi-crew-worker", key, req.name),
             cwd: req.cwd,
             model: req.model || process.env.PI_CREW_DEFAULT_MODEL || DEFAULT_MODEL,
+            ...(req.allowDefaultBranch ? { allowDefaultBranch: true } : {}),
             n: nextNumber(workers.values()),
             ...(req.group ? { group: req.group } : {}),
             state: req.task ? "work" : "idle",
