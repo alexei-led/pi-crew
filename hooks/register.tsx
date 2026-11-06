@@ -3,8 +3,8 @@ import type { EngineInterface as Engine, Register } from 'claude-code'
 
 import type { CrewFilter, CrewLead, CrewMsg, CrewTab, CrewView, CrewWorker } from '../types'
 import {
-  COLOR, GLYPH, LABEL, UNREAD, age, clampText, clip, fold, groups, inboxOrder, matches, nextQuestion, oneLine, tag, tally,
-  threadOf, turnHead,
+  COLOR, GLYPH, LABEL, UNREAD, age, checksLine, clampText, clip, fold, groups, inboxOrder, matches, nextQuestion, oneLine, tag,
+  tally, threadOf, turnHead,
 } from './model'
 
 const PLUGIN = 'pi-crew'
@@ -33,8 +33,9 @@ type Inbound = {
   id: string
   replyTo?: string
   expectsReply: boolean
-  kind: CrewMsg['kind']
+  kind: CrewMsg['kind'] | 'idle'
   text: string
+  checks?: { ok: boolean; notes: string[] }
 }
 
 type BridgeEvent =
@@ -52,7 +53,9 @@ const TOOLS = [
     description:
       'Start a Pi worker (pi-work) in a new agterm session after this one. It registers on pi-intercom with a fixed id, ' +
       'learns that this session leads it, and reports back with intercom send; each report starts a new turn here. ' +
-      'Workers start a question with "Q:" and a finished task with "DONE:". Give a first task to start it working at once.',
+      'Workers start a question with "Q:" and a finished task with "DONE:" carrying head, branch, tests, rc and logs, which the ' +
+      'bridge checks against git. Give a first task to start it working at once. With a task, a cwd on the default branch is ' +
+      'refused: give each worker its own worktree.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -61,6 +64,7 @@ const TOOLS = [
         model: { type: 'string', description: 'Pi model/router profile. Default router/openai-work.' },
         task: { type: 'string', description: 'First task. Omit to start the worker idle.' },
         group: { type: 'string', description: 'Optional group shown in the crew pane, e.g. "backend". Lowercase, dashes.' },
+        allowDefaultBranch: { type: 'boolean', description: 'Allow a task in a checkout on the default branch. Default false.' },
       },
       required: ['name', 'cwd'],
     },
@@ -68,7 +72,8 @@ const TOOLS = [
   {
     name: 'send',
     description:
-      'Send a message to a worker (by worker name) or any intercom session (by full session id). ' +
+      'Send a message to a worker (by worker name) or any intercom session: by full id, by its session name (any case), ' +
+      'or by a unique id prefix of 6+ characters. An ambiguous or unknown name fails and lists the live sessions. ' +
       'Fails when the broker could not deliver it. To answer a question, pass its message id as replyTo.',
     inputSchema: {
       type: 'object',
@@ -82,7 +87,9 @@ const TOOLS = [
   },
   {
     name: 'list',
-    description: 'List live intercom sessions and the workers this session spawned, with number, group and state.',
+    description:
+      'List the crew (number, name, state, waitingOnLead, unread, time since the last message, live intercom status ' +
+      'with the time since it last turned busy or idle, context %, open question) and the live intercom sessions.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
@@ -93,7 +100,10 @@ const TOOLS = [
 ] as const
 
 const OPS: Record<string, (input: Record<string, unknown>) => Record<string, unknown>> = {
-  spawn: input => ({ op: 'spawn', name: input.name, cwd: input.cwd, model: input.model, task: input.task, group: input.group }),
+  spawn: input => ({
+    op: 'spawn', name: input.name, cwd: input.cwd, model: input.model, task: input.task, group: input.group,
+    allowDefaultBranch: input.allowDefaultBranch,
+  }),
   send: input => ({ op: 'send', to: input.to, text: input.text, replyTo: input.replyTo }),
   list: () => ({ op: 'list' }),
   stop: input => ({ op: 'stop', name: input.name }),
@@ -140,9 +150,12 @@ async function deliver($: Engine, ev: Inbound) {
     `intercom id ${ev.from.id}, cwd ${ev.from.cwd}, message ${ev.id}`,
     ev.replyTo ? `in reply to ${ev.replyTo}` : '',
     ev.kind === 'ask' ? `Answer with mcp__pi-crew__send to "${peer}" replyTo "${ev.id}".` : '',
+    ev.kind === 'idle' ? `Check it: its screen below, mcp__pi-crew__send to nudge "${peer}", or mcp__pi-crew__stop.` : '',
   ].filter(Boolean)
+  const checks = checksLine(ev.checks)
   const body = [
     head.join('; '),
+    ...(checks ? [checks] : []),
     ...(notes?.length ? [`Since its last report the user wrote to ${peer} from the crew pane: ${notes.map(n => `"${n}"`).join(', ')}`] : []),
     '',
     ev.text,

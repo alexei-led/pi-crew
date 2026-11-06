@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
-import { age, clampText, clip, fold, groups, inboxOrder, nextQuestion, tally, turnHead } from "../hooks/model.ts";
+import { age, checksLine, clampText, clip, fold, groups, inboxOrder, nextQuestion, tally, turnHead } from "../hooks/model.ts";
 import type { CrewWorker } from "../types/index.d.ts";
 
 const w = (name: string, n: number, more: Partial<CrewWorker> = {}): CrewWorker => ({
@@ -55,5 +55,15 @@ test("turnHead uses the same glyph, number and name as the pane", () => {
   assert.equal(turnHead(api, "ask", "api"), "◆ Worker 3 api asks");
   assert.equal(turnHead(api, "done", "api"), "○ Worker 3 api reports done");
   assert.equal(turnHead(api, "report", "api"), "● Worker 3 api reports");
+  assert.equal(turnHead(api, "idle", "api"), "◇ Worker 3 api is idle without a report");
   assert.match(turnHead(undefined, "report", "stranger"), /"stranger" \(not a crew worker\)/);
+});
+
+test("checksLine passes a verified DONE on and marks a failed one unverified", () => {
+  assert.equal(checksLine(undefined), "");
+  assert.match(checksLine({ ok: true, notes: [] }), /^DONE checks passed: .*Still review the work itself\.$/);
+  assert.equal(
+    checksLine({ ok: false, notes: ["missing rc", "uncommitted changes in /w: 2 path(s)"] }),
+    "DONE checks failed: missing rc; uncommitted changes in /w: 2 path(s). Treat the report as unverified.",
+  );
 });

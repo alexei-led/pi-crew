@@ -32,6 +32,13 @@ export const FEED_PER_WORKER = 10;
 export const GONE_TTL_MS = 30 * 60_000;
 /** Messages older than this are dropped: the feed is for current work, not history. */
 export const FEED_TTL_MS = 24 * 3_600_000;
+/** A working worker idle this long with no message wakes the lead. `PI_CREW_IDLE_MIN=0` turns the alert off. */
+export const DEFAULT_IDLE_MIN = 10;
+export const idleMs = (env: Env = process.env) => {
+  const raw = env.PI_CREW_IDLE_MIN?.trim();
+  const min = raw ? Number(raw) : DEFAULT_IDLE_MIN;
+  return Number.isFinite(min) && min > 0 ? min * 60_000 : 0;
+};
 
 /** A deterministic UUID-shaped id, so a restarted bridge or worker keeps its broker mailbox. */
 export function stableId(...parts: string[]): string {
@@ -69,7 +76,132 @@ export type Worker = {
   last?: Preview;
   /** The open question, until the lead answers it. */
   ask?: Preview;
+  /** When the lead was last told this worker sits idle; one alert per idle stretch. */
+  alertedAt?: number;
 };
+
+/**
+ * What the broker's presence says about a session: Pi's lifecycle status, since when, and context use. `fresh`: first
+ * seen in this state by this bridge (after a start or a reconnect), so `since` is when we noticed, not when it began.
+ */
+export type Live = { status?: string; since: number; fresh?: boolean; contextPct?: number };
+/** A broker session as presence and listSessions report it. */
+export type SessionInfo = { id: string; name?: string; status?: string; cwd?: string; model?: string; contextPct?: number; lastActivity?: number };
+
+/** Pi reports "idle", "thinking" or "tool:<name>", optionally followed by " · <custom status>". */
+export const isIdleStatus = (status?: string) => /^idle\b/.test(status ?? "");
+
+/** `since` moves only when the session goes from busy to idle or back; heartbeats keep it. */
+export function trackLive(prev: Live | undefined, s: Pick<SessionInfo, "status" | "contextPct">, now: number): Live {
+  const ctx = s.contextPct != null ? { contextPct: s.contextPct } : {};
+  if (!prev) return { status: s.status, since: now, fresh: true, ...ctx };
+  if (isIdleStatus(prev.status) !== isIdleStatus(s.status)) return { status: s.status, since: now, ...ctx };
+  return { status: s.status, since: prev.since, ...(prev.fresh ? { fresh: true } : {}), ...ctx };
+}
+
+/**
+ * A worker on a task that has sat idle (or is off the broker) for `ms` since its last message, and the lead has not
+ * heard about this stretch yet. A worker that asked or reported done is waiting by design.
+ */
+export function idleDue(w: Worker, live: Live | undefined, now: number, ms: number): boolean {
+  if (!ms || w.state !== "work" || !w.agtermSession) return false;
+  if (live && !isIdleStatus(live.status)) return false;
+  const since = quietSince(w, live);
+  return now - since >= ms && !(w.alertedAt && w.alertedAt >= since);
+}
+
+/** When the worker's current quiet stretch began. A fresh entry's `since` is only when this bridge noticed it. */
+export const quietSince = (w: Pick<Worker, "lastAt">, live: Live | undefined) =>
+  Math.max(w.lastAt, live && !live.fresh ? live.since : 0);
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ID_PREFIX_MIN = 6;
+
+/**
+ * Who `to` names: a worker, an exact session id, a unique session name (any case), or a unique id prefix.
+ * A full id nobody lists yet passes through, so the broker can queue for a stable id that is offline.
+ */
+export function resolveTarget(to: string, workers: Iterable<Worker>, sessions: SessionInfo[]): { id: string; worker?: Worker } {
+  const t = to.trim();
+  const list = [...workers];
+  // Whatever names a crew worker's session resolves to that worker, so the send updates its record.
+  const found = (id: string) => {
+    const worker = list.find(x => x.id === id);
+    return worker ? { id, worker } : { id };
+  };
+  const w = list.find(x => x.name === t);
+  if (w) return { id: w.id, worker: w };
+  if (sessions.some(s => s.id === t) || UUID.test(t)) return found(t);
+  const describe = (list: SessionInfo[]) => list.map(s => `${s.name ?? "?"} (${s.id})`).join(", ");
+  const byName = sessions.filter(s => s.name?.toLowerCase() === t.toLowerCase());
+  if (byName.length === 1) return found(byName[0]!.id);
+  if (byName.length > 1) throw new Error(`"${t}" names ${byName.length} sessions: ${describe(byName)}; pass the full id`);
+  const byPrefix = t.length >= ID_PREFIX_MIN ? sessions.filter(s => s.id.startsWith(t)) : [];
+  if (byPrefix.length === 1) return found(byPrefix[0]!.id);
+  if (byPrefix.length > 1) throw new Error(`"${t}" is a prefix of ${byPrefix.length} ids: ${describe(byPrefix)}`);
+  throw new Error(`no worker or session named "${t}"; live: ${describe(sessions) || "none"}`);
+}
+
+/** The fields a DONE report must carry so the lead can check it mechanically. */
+export const DONE_FIELDS = ["head", "branch", "tests", "rc", "logs"] as const;
+export type DoneFields = Partial<Record<(typeof DONE_FIELDS)[number], string>>;
+
+/**
+ * Reads `key: value` lines of a DONE report. The brief puts them last, so the last of each wins over a body line that
+ * happens to start the same way. head, branch and rc take one token; tests and logs the rest of the line.
+ */
+export function parseDone(text: string): DoneFields {
+  const out: DoneFields = {};
+  for (const line of text.split("\n")) {
+    const m = /^\s*[-*]?\s*(head|branch|tests|rc|logs)\s*[:=]\s*(.+?)\s*$/i.exec(line);
+    if (!m) continue;
+    const key = m[1]!.toLowerCase() as keyof DoneFields;
+    out[key] = key === "tests" || key === "logs" ? m[2]! : m[2]!.split(/\s+/)[0]!.replace(/[`'",;]/g, "");
+  }
+  return out;
+}
+
+/** Runs git in a directory; undefined when git fails (not a repo, no such ref). */
+export type Git = (cwd: string, args: string[]) => Promise<string | undefined>;
+
+/** The branch the repository's origin points HEAD at, else main or master if one exists. */
+export async function defaultBranch(git: Git, cwd: string): Promise<string | undefined> {
+  const origin = await git(cwd, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
+  if (origin) return origin.replace(/^origin\//, "");
+  for (const b of ["main", "master"]) if (await git(cwd, ["rev-parse", "--verify", "--quiet", `refs/heads/${b}`])) return b;
+  return undefined;
+}
+
+/**
+ * Checks a DONE report against the worker's checkout: fields present, HEAD and branch as claimed, tree clean,
+ * not on the default branch, the main checkout untouched, a zero rc. Each line of `notes` is one finding.
+ */
+export async function verifyDone(fields: DoneFields, cwd: string, git: Git): Promise<{ ok: boolean; notes: string[] }> {
+  const notes: string[] = [];
+  const missing = DONE_FIELDS.filter(k => !fields[k]);
+  if (missing.length) notes.push(`missing ${missing.join(", ")}`);
+  if (fields.rc && fields.rc !== "0") notes.push(`reported rc=${fields.rc}`);
+  const head = await git(cwd, ["rev-parse", "HEAD"]);
+  if (!head) {
+    notes.push(`${cwd} is not a git checkout; head and branch unchecked`);
+    return { ok: false, notes };
+  }
+  if (fields.head) {
+    const claimed = fields.head.toLowerCase();
+    if (claimed.length < 7 || !head.startsWith(claimed)) notes.push(`head ${fields.head} is not HEAD ${head.slice(0, 12)}`);
+  }
+  const branch = (await git(cwd, ["branch", "--show-current"])) ?? "";
+  if (fields.branch && fields.branch !== branch) notes.push(`branch ${fields.branch} is not the checked-out ${branch || "detached HEAD"}`);
+  const base = await defaultBranch(git, cwd);
+  if (base && branch === base) notes.push(`on the default branch ${base}`);
+  const dirty = await git(cwd, ["status", "--porcelain"]);
+  if (dirty) notes.push(`uncommitted changes in ${cwd}: ${dirty.split("\n").length} path(s)`);
+  // The first worktree listed is the main checkout: edits that escaped a linked worktree land there.
+  const main = /^worktree (.+)$/m.exec((await git(cwd, ["worktree", "list", "--porcelain"])) ?? "")?.[1];
+  const top = await git(cwd, ["rev-parse", "--show-toplevel"]);
+  if (main && top && main !== top && (await git(main, ["status", "--porcelain"]))) notes.push(`main checkout ${main} has uncommitted changes`);
+  return { ok: notes.length === 0, notes };
+}
 
 const clip = (text: string, max = PREVIEW_LIMIT) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
 
@@ -162,15 +294,22 @@ export function readLines<T>(file: string, limit = Infinity): T[] {
 }
 
 /** The first prompt a spawned worker reads: who leads it and how to report. */
-export function workerBrief(lead: { name: string; id: string }, worker: { name: string }, task?: string): string {
+export function workerBrief(lead: { name: string; id: string }, worker: { name: string; cwd: string }, task?: string): string {
   return [
     `You are "${worker.name}", a worker in a crew led by a Claude Code session named "${lead.name}" (intercom id ${lead.id}).`,
+    `Your working directory is ${worker.cwd}. Run every command there and edit files only under it. Do not cd elsewhere or write by absolute path outside it.`,
     `The lead cannot see this terminal. Your final answer here reaches nobody. The ONLY way to report is`,
     `intercom({ action: "send", to: "${lead.id}", message: "..." }).`,
     `The intercom tool exists in every session. In codemode call it as tools.intercom({ action: "send", to: ..., message: ... }); searchTools("intercom") finds it.`,
     `Rules:`,
     `- Finish every task, question or blocker with exactly one send. A task is not done until that send succeeds.`,
     `- Start the message with "Q: " when the lead must decide something, with "DONE: " when the task is finished. Anything else is a progress report.`,
+    `- A DONE report ends with these lines, one each, so the lead can check them; commit first:`,
+    `    head: <full commit sha>`,
+    `    branch: <branch>`,
+    `    tests: <the exact command you ran>`,
+    `    rc: <its exit code>`,
+    `    logs: <paths of logs or output files, or none>`,
     `- Keep it short: outcome first, then key paths and commands.`,
     `- Address the lead by the id above, never by name: names can repeat. Use "send", never "ask".`,
     `- After the send, stop and wait; the lead answers with a new message.`,

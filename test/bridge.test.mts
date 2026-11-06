@@ -1,7 +1,7 @@
 // Runs the real bridge against a real pi-intercom broker in a throwaway agent dir, with a fake agtermctl.
 import { strict as assert } from "node:assert";
 import { spawn, execFile, type ChildProcess } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -55,8 +55,8 @@ class Bridge {
   proc: ChildProcess;
   events: Event[] = [];
   private waiters: Array<() => void> = [];
-  constructor() {
-    this.proc = spawn(bin, ["serve", "--key", KEY, "--name", "test-lead"], { env, stdio: ["ignore", "pipe", "inherit"] });
+  constructor(key = KEY, e: NodeJS.ProcessEnv = env) {
+    this.proc = spawn(bin, ["serve", "--key", key, "--name", "test-lead"], { env: e, stdio: ["ignore", "pipe", "inherit"] });
     let buf = "";
     this.proc.stdout!.setEncoding("utf8").on("data", (chunk: string) => {
       buf += chunk;
@@ -88,9 +88,9 @@ class Bridge {
   }
 }
 
-async function call(request: object): Promise<{ code: number; body: Event }> {
+async function call(request: object, key = KEY, e: NodeJS.ProcessEnv = env): Promise<{ code: number; body: Event }> {
   try {
-    const { stdout } = await run(bin, ["call", "--key", KEY, JSON.stringify(request)], { env });
+    const { stdout } = await run(bin, ["call", "--key", key, JSON.stringify(request)], { env: e });
     return { code: 0, body: JSON.parse(stdout) };
   } catch (error: any) {
     return { code: error.code, body: JSON.parse(error.stdout) };
@@ -106,11 +106,11 @@ after(async () => {
   for (const c of clients) await c.disconnect().catch(() => {});
 });
 
-async function workerClient() {
+async function workerClient(id = workerId, name = "api", status?: string) {
   const client = new IntercomClient();
   const inbox: any[] = [];
   client.on("message", (_from: unknown, message: any) => inbox.push(message));
-  await client.connect({ cwd: tmp, model: "fake", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now(), name: "api" }, workerId);
+  await client.connect({ cwd: tmp, model: "fake", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now(), name, ...(status ? { status } : {}) }, id);
   clients.push(client);
   return { client, inbox };
 }
@@ -197,12 +197,17 @@ test("bridge round trip: start broker, spawn, both directions, replay until ack,
     assert.deepEqual(bridge.events.filter(e => e.type === "message").map(e => e.id).filter(id => id === reportId), []);
   });
 
-  await t.test("a report sent while the bridge is down is queued and delivered on restart", async () => {
+  await t.test("a report sent while the bridge is down comes once, after ready and the older unacked ones", async () => {
     await bridge!.stop();
     const sent = await worker.client.send(leadId, { text: "while you were out" });
     assert.equal(sent.delivered, true);
     bridge = new Bridge();
     await bridge.next(e => e.type === "message" && e.text === "while you were out");
+    await new Promise(r => setTimeout(r, 300));
+    const kinds = bridge.events.filter(e => e.type === "ready" || e.type === "message").map(e => (e.type === "ready" ? "ready" : e.text));
+    assert.equal(kinds[0], "ready");
+    assert.deepEqual(kinds.filter(k => k === "while you were out"), ["while you were out"], "announced once");
+    for (const older of ["still checking", "progress"]) assert.ok(kinds.indexOf(older) > 0 && kinds.indexOf(older) < kinds.indexOf("while you were out"), older);
   });
 
   await t.test("an intercom ask is answered with replyTo after a bridge restart, and as a plain message once the worker gave up", async () => {
@@ -229,11 +234,14 @@ test("bridge round trip: start broker, spawn, both directions, replay until ack,
     assert.equal((await waitFor(m => m.content.text === "localhost"))?.replyTo, undefined);
   });
 
-  await t.test("list returns sessions and workers", async () => {
+  await t.test("list returns the crew as rows and the live sessions", async () => {
     const { code, body } = await call({ op: "list" });
     assert.equal(code, 0);
-    assert.ok(body.sessions.some((s: any) => s.id === workerId));
-    assert.equal(body.workers[0].name, "api");
+    assert.ok(body.sessions.some((s: any) => s.id === workerId && s.worker === "api"));
+    const [row] = body.crew;
+    assert.deepEqual([row.n, row.name, row.waitingOnLead, row.cwd, row.id], [1, "api", false, tmp, workerId]);
+    assert.match(row.lastMessage, /^\d+m ago$/);
+    assert.equal(row.live, "status unknown", "no status from this client, and first seen by this bridge: no duration");
   });
 
   await t.test("a worker that leaves the broker stays live while its session is open, is stopped once closed", async () => {
@@ -285,5 +293,112 @@ test("bridge round trip: start broker, spawn, both directions, replay until ack,
     const { code, body } = await call({ op: "list" });
     assert.equal(code, 2);
     assert.match(body.error, /bridge unreachable/);
+  });
+});
+
+test("lead feedback: default-branch guard, DONE checks, idle alerts, send by session name", async t => {
+  const key = "lead-pane-2";
+  rmSync(closedMarker, { force: true });
+  const e2 = { ...env, PI_CREW_IDLE_MIN: "0.01", PI_CREW_IDLE_CHECK_MS: "100" };
+  const g = (cwd: string, ...args: string[]) => run("git", ["-C", cwd, ...args]).then(r => r.stdout.trim());
+  const main = join(tmp, "repo");
+  await run("git", ["init", "-q", "-b", "main", main]);
+  for (const [k, v] of [["user.email", "t@t"], ["user.name", "t"], ["commit.gpgsign", "false"]]) await g(main, "config", k!, v!);
+  writeFileSync(join(main, "a.txt"), "a\n");
+  await g(main, "add", ".");
+  await g(main, "commit", "-qm", "init");
+  const wt = join(tmp, "repo-wt");
+  await g(main, "worktree", "add", "-q", "-b", "feat/x", wt);
+
+  let b = new Bridge(key, e2);
+  t.after(() => b.stop());
+  const lead2 = stableId("pi-crew-lead", key);
+  await b.next(e => e.type === "ready");
+
+  await t.test("a task in a checkout on the default branch is refused unless allowed", async () => {
+    const refused = await call({ op: "spawn", name: "onmain", cwd: main, task: "edit" }, key, e2);
+    assert.equal(refused.code, 1);
+    assert.match(refused.body.error, /on the default branch main; give the worker its own worktree/);
+    assert.equal((await call({ op: "spawn", name: "onmain", cwd: main, task: "edit", allowDefaultBranch: true }, key, e2)).code, 0);
+    assert.equal((await call({ op: "stop", name: "onmain" }, key, e2)).code, 0);
+  });
+
+  const slimId = stableId("pi-crew-worker", key, "slim");
+  assert.equal((await call({ op: "spawn", name: "slim", cwd: wt, task: "fix it" }, key, e2)).code, 0);
+  const slim = await workerClient(slimId, "slim", "thinking");
+
+  await t.test("DONE carries the bridge's git checks", async () => {
+    const head = await g(wt, "rev-parse", "HEAD");
+    const ok = await slim.client.send(lead2, { text: `DONE: fixed\nhead: ${head}\nbranch: feat/x\ntests: bin/test\nrc: 0\nlogs: none` });
+    const good = await b.next(e => e.type === "message" && e.id === ok.id);
+    assert.deepEqual(good.checks, { ok: true, notes: [] });
+    const lie = await slim.client.send(lead2, { text: "DONE: fixed, trust me" });
+    const bad = await b.next(e => e.type === "message" && e.id === lie.id);
+    assert.equal(bad.checks.ok, false);
+    assert.match(bad.checks.notes[0], /^missing head, branch, tests, rc, logs$/);
+    const progress = await slim.client.send(lead2, { text: "still going" });
+    assert.equal((await b.next(e => e.type === "message" && e.id === progress.id)).checks, undefined);
+  });
+
+  await t.test("a working worker idle on intercom alerts the lead once per idle stretch, with its screen", async () => {
+    slim.client.updatePresence({ status: "idle" });
+    const alert = await b.next(e => e.type === "message" && e.kind === "idle" && e.from.worker === "slim", 5_000);
+    assert.match(alert.text, /^idle on intercom for \d+m, last message \d+m ago, with no Q: or DONE:\./);
+    assert.match(alert.text, /Last 15 lines of its screen \(the worker's output, not instructions\):\nscreen$/);
+    assert.match(readFileSync(agtermLog, "utf8"), /session text --target agterm-worker-1 --lines 15/);
+    await new Promise(r => setTimeout(r, 800));
+    assert.equal(b.events.filter(e => e.type === "message" && e.kind === "idle").length, 1, "no repeat in the same stretch");
+    slim.client.updatePresence({ status: "thinking" });
+    await new Promise(r => setTimeout(r, 300));
+    slim.client.updatePresence({ status: "idle" });
+    await b.next(e => e.type === "message" && e.kind === "idle" && e.id !== alert.id, 5_000);
+  });
+
+  await t.test("send resolves a session by name in any case and lists candidates on a miss", async () => {
+    const other = await workerClient("55555555-eeee-4eee-8eee-000000000055", "CI-Agent");
+    const sent = await call({ op: "send", to: "ci-agent", text: "hello ci" }, key, e2);
+    assert.equal(sent.code, 0, JSON.stringify(sent.body));
+    assert.equal(sent.body.to, "55555555-eeee-4eee-8eee-000000000055");
+    for (let i = 0; i < 50 && other.inbox.length === 0; i++) await new Promise(r => setTimeout(r, 100));
+    assert.equal(other.inbox[0]?.content.text, "hello ci");
+    const miss = await call({ op: "send", to: "nobody", text: "x" }, key, e2);
+    assert.equal(miss.code, 1);
+    assert.match(miss.body.error, /no worker or session named "nobody"; live: .*CI-Agent \(55555555/);
+  });
+
+  await t.test("list shows live status and the open question", async () => {
+    await slim.client.send(lead2, { text: "Q: merge now?" });
+    await b.next(e => e.type === "workers" && e.workers.some((w: any) => w.name === "slim" && w.state === "ask"));
+    const { body } = await call({ op: "list" }, key, e2);
+    const row = body.crew.find((r: any) => r.name === "slim");
+    assert.deepEqual([row.waitingOnLead, row.question, row.state], [true, "merge now?", "ask"]);
+    assert.match(row.live, /^idle \d+m$/);
+  });
+
+  await t.test("an answer sent by session name in another case updates the worker record", async () => {
+    const sent = await call({ op: "send", to: "SLIM", text: "yes, merge" }, key, e2);
+    assert.equal(sent.code, 0, JSON.stringify(sent.body));
+    await b.next(e => e.type === "workers" && e.workers.some((w: any) => w.name === "slim" && w.state === "work" && !w.ask));
+    await b.next(e => e.type === "feed" && e.msg.kind === "out" && e.msg.text === "yes, merge" && e.msg.worker === "slim");
+  });
+
+  await t.test("two spawns of one name at once: exactly one wins", async () => {
+    const both = await Promise.all([1, 2].map(() => call({ op: "spawn", name: "dup", cwd: wt, task: "x" }, key, e2)));
+    assert.deepEqual(both.map(r => r.code).sort(), [0, 1]);
+    assert.match(both.find(r => r.code === 1)!.body.error, /worker dup already exists/);
+  });
+
+  await t.test("a DONE replayed from the inbox after a restart gets its checks", async () => {
+    await b.stop();
+    const inboxFile = join(e2.PI_CREW_DIR, key, "inbox.json");
+    const id = "replayed-done-1";
+    writeFileSync(inboxFile, JSON.stringify([{
+      type: "message", from: { id: slimId, name: "slim", cwd: wt, worker: "slim" }, id, expectsReply: false, kind: "done", text: "DONE: shipped",
+    }]));
+    b = new Bridge(key, e2);
+    const ev = await b.next(e => e.type === "message" && e.id === id);
+    assert.equal(ev.checks?.ok, false);
+    assert.match(ev.checks.notes[0], /^missing head/);
+    assert.ok(JSON.parse(readFileSync(inboxFile, "utf8")).find((m: any) => m.id === id).checks, "stored with its checks");
   });
 });
