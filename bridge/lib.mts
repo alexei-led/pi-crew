@@ -65,6 +65,7 @@ export type Worker = {
   id: string;
   cwd: string;
   model: string;
+  allowDefaultBranch?: boolean;
   agtermSession?: string;
   /** Spawn order: the number the UI shows next to the name. Not reused while the record exists. */
   n: number;
@@ -174,9 +175,9 @@ export async function defaultBranch(git: Git, cwd: string): Promise<string | und
 
 /**
  * Checks a DONE report against the worker's checkout: fields present, HEAD and branch as claimed, tree clean,
- * not on the default branch, the main checkout untouched, a zero rc. Each line of `notes` is one finding.
+ * not on the default branch unless explicitly allowed, the main checkout untouched, a zero rc. Each line of `notes` is one finding.
  */
-export async function verifyDone(fields: DoneFields, cwd: string, git: Git): Promise<{ ok: boolean; notes: string[] }> {
+export async function verifyDone(fields: DoneFields, cwd: string, git: Git, allowDefaultBranch = false): Promise<{ ok: boolean; notes: string[] }> {
   const notes: string[] = [];
   const missing = DONE_FIELDS.filter(k => !fields[k]);
   if (missing.length) notes.push(`missing ${missing.join(", ")}`);
@@ -193,7 +194,7 @@ export async function verifyDone(fields: DoneFields, cwd: string, git: Git): Pro
   const branch = (await git(cwd, ["branch", "--show-current"])) ?? "";
   if (fields.branch && fields.branch !== branch) notes.push(`branch ${fields.branch} is not the checked-out ${branch || "detached HEAD"}`);
   const base = await defaultBranch(git, cwd);
-  if (base && branch === base) notes.push(`on the default branch ${base}`);
+  if (!allowDefaultBranch && base && branch === base) notes.push(`on the default branch ${base}`);
   const dirty = await git(cwd, ["status", "--porcelain"]);
   if (dirty) notes.push(`uncommitted changes in ${cwd}: ${dirty.split("\n").length} path(s)`);
   // The first worktree listed is the main checkout: edits that escaped a linked worktree land there.
@@ -302,9 +303,9 @@ export function workerBrief(lead: { name: string; id: string }, worker: { name: 
     `intercom({ action: "send", to: "${lead.id}", message: "..." }).`,
     `The intercom tool exists in every session. In codemode call it as tools.intercom({ action: "send", to: ..., message: ... }); searchTools("intercom") finds it.`,
     `Rules:`,
-    `- Finish every task, question or blocker with exactly one send. A task is not done until that send succeeds.`,
+    `- Finish each task, question or blocker with exactly one send for that task or question. Progress reports are allowed. A task is not done until its final send succeeds.`,
     `- Start the message with "Q: " when the lead must decide something, with "DONE: " when the task is finished. Anything else is a progress report.`,
-    `- A DONE report ends with these lines, one each, so the lead can check them; commit first:`,
+    `- A DONE report ends with these lines, one each, so the lead can check them; if you changed files, commit first; a task that changes nothing reports the current HEAD and \`tests: none\`:`,
     `    head: <full commit sha>`,
     `    branch: <branch>`,
     `    tests: <the exact command you ran>`,

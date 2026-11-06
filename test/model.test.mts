@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
-import { age, checksLine, clampText, clip, fold, groups, inboxOrder, nextQuestion, tally, turnHead } from "../hooks/model.ts";
+import { age, checksLine, clampText, clip, fold, groups, inboxOrder, nextQuestion, tally, turnHead, turnText } from "../hooks/model.ts";
 import type { CrewWorker } from "../types/index.d.ts";
 
 const w = (name: string, n: number, more: Partial<CrewWorker> = {}): CrewWorker => ({
@@ -66,4 +66,20 @@ test("checksLine passes a verified DONE on and marks a failed one unverified", (
     checksLine({ ok: false, notes: ["missing rc", "uncommitted changes in /w: 2 path(s)"] }),
     "DONE checks failed: missing rc; uncommitted changes in /w: 2 path(s). Treat the report as unverified.",
   );
+});
+
+
+test("turn text puts the headline, answer instruction and metadata on separate lines", () => {
+  const event = { type: "message" as const, kind: "ask" as const, id: "q1", expectsReply: true, from: { id: "session", cwd: "/w", worker: "api" }, text: "Question?" };
+  assert.deepEqual(turnText(w("api", 3), event).split("\n"), [
+    "◆ Worker 3 api asks",
+    'Answer with mcp__pi-crew__send to "api" replyTo "q1".',
+    "intercom id session, cwd /w, message q1", "", "Question?",
+  ]);
+  const done = turnText(w("api", 3), { ...event, kind: "done", checks: { ok: true, notes: [] }, replyTo: "task" }, ["ship it"]).split("\n");
+  assert.equal(done[0], "○ Worker 3 api reports done");
+  assert.equal(done[1], "intercom id session, cwd /w, message q1, in reply to task");
+  assert.match(done[2]!, /^DONE checks passed:/);
+  assert.match(done[3]!, /user wrote to api.*"ship it"/);
+  assert.deepEqual(done.slice(4), ["", "Question?"]);
 });

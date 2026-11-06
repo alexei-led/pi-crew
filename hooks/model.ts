@@ -103,3 +103,30 @@ export function turnHead(w: CrewWorker | undefined, kind: CrewMsg['kind'] | 'idl
   const verb = kind === 'ask' ? 'asks' : kind === 'done' ? 'reports done' : 'reports'
   return `${kind === 'ask' ? GLYPH.ask : kind === 'done' ? GLYPH.idle : GLYPH.work} Worker ${tag(w)} ${verb}`
 }
+
+export type Inbound = {
+  type: 'message'
+  from: { id: string; name?: string; cwd: string; worker?: string }
+  id: string
+  replyTo?: string
+  expectsReply: boolean
+  kind: CrewMsg['kind'] | 'idle'
+  text: string
+  checks?: { ok: boolean; notes: string[] }
+}
+
+/** Human-readable turn: the headline stays searchable independently of transport metadata. */
+export function turnText(worker: CrewWorker | undefined, ev: Inbound, notes?: string[]): string {
+  const peer = ev.from.worker ?? ev.from.name ?? ev.from.id
+  const checks = checksLine(ev.checks)
+  return [
+    turnHead(worker, ev.kind, peer),
+    ...(ev.kind === 'ask' ? [`Answer with mcp__pi-crew__send to "${peer}" replyTo "${ev.id}".`] : []),
+    `intercom id ${ev.from.id}, cwd ${ev.from.cwd}, message ${ev.id}${ev.replyTo ? `, in reply to ${ev.replyTo}` : ''}`,
+    ...(ev.kind === 'idle' ? [`Check it: its screen below, mcp__pi-crew__send to nudge "${peer}", or mcp__pi-crew__stop.`] : []),
+    ...(checks ? [checks] : []),
+    ...(notes?.length ? [`Since its last report the user wrote to ${peer} from the crew pane: ${notes.map(n => `"${n}"`).join(', ')}`] : []),
+    '',
+    ev.text,
+  ].join('\n')
+}

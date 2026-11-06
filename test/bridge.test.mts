@@ -320,6 +320,12 @@ test("lead feedback: default-branch guard, DONE checks, idle alerts, send by ses
     assert.equal(refused.code, 1);
     assert.match(refused.body.error, /on the default branch main; give the worker its own worktree/);
     assert.equal((await call({ op: "spawn", name: "onmain", cwd: main, task: "edit", allowDefaultBranch: true }, key, e2)).code, 0);
+    const onmain = await workerClient(stableId("pi-crew-worker", key, "onmain"), "onmain", "thinking");
+    const head = await g(main, "rev-parse", "HEAD");
+    const report = await onmain.client.send(lead2, { text: `DONE: inspected\nhead: ${head}\nbranch: main\ntests: none\nrc: 0\nlogs: none` });
+    assert.deepEqual((await b.next(e => e.type === "message" && e.id === report.id)).checks, { ok: true, notes: [] });
+    const ready = JSON.parse(readFileSync(join(e2.PI_CREW_DIR, key, "workers.json"), "utf8"));
+    assert.equal(ready.find((w: { name: string; allowDefaultBranch?: boolean }) => w.name === "onmain").allowDefaultBranch, true);
     assert.equal((await call({ op: "stop", name: "onmain" }, key, e2)).code, 0);
   });
 

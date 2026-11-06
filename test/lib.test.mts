@@ -30,6 +30,9 @@ test("workerBrief names the lead id and carries the task", () => {
   const worker = base;
   const brief = workerBrief({ name: "lead", id: "LEAD-ID" }, worker, "do the thing");
   assert.match(brief, /to: "LEAD-ID"/);
+  assert.match(brief, /if you changed files, commit first/);
+  assert.match(brief, /changes nothing reports the current HEAD and `tests: none`/);
+  assert.match(brief, /Progress reports are allowed/);
   assert.match(brief, /First task:\ndo the thing$/);
   assert.match(brief, /working directory is \/x\. Run every command there/);
   for (const field of ["head", "branch", "tests", "rc", "logs"]) assert.match(brief, new RegExp(`^ +${field}: <`, "m"), field);
@@ -250,6 +253,11 @@ test("verifyDone checks the claims against the checkout", async () => {
     `main checkout ${main} has uncommitted changes`,
   ]);
   assert.deepEqual((await verifyDone({ ...good, branch: "main" }, main, realGit)).notes, ["on the default branch main", `uncommitted changes in ${main}: 1 path(s)`]);
+
+  assert.deepEqual((await verifyDone({ ...good, branch: "main" }, main, realGit, true)).notes, [`uncommitted changes in ${main}: 1 path(s)`]);
+  assert.deepEqual((await verifyDone({ ...good, branch: "wrong", head: "bad", rc: "1" }, main, realGit, true)).notes, [
+    "reported rc=1", `head bad is not HEAD ${head.slice(0, 12)}`, "branch wrong is not the checked-out main", `uncommitted changes in ${main}: 1 path(s)`,
+  ]);
 
   const none = mkdtempSync(join(tmpdir(), "pi-crew-nogit-"));
   assert.deepEqual(await verifyDone(good, none, realGit), { ok: false, notes: [`${none} is not a git checkout; head and branch unchecked`] });
