@@ -1,0 +1,14 @@
+#!/bin/sh
+# Type-check the mod (tsconfig.json) and the bridge with its tests (tsconfig.bridge.json) with TypeScript 7.
+# The repo has no package.json: typescript and @types/node are installed once into a cache dir.
+set -eu
+here=$(cd "$(dirname "$0")/.." && pwd)
+cache=${PI_CREW_TYPECHECK_DIR:-${TMPDIR:-/tmp}/pi-crew-typecheck}
+tsc=$cache/node_modules/.bin/tsc
+if [ ! -x "$tsc" ] || [ ! -d "$cache/node_modules/@types/node" ]; then
+  mkdir -p "$cache"
+  npm install --prefix "$cache" --cache "$cache/npm" --no-audit --no-fund --silent typescript@7 @types/node
+fi
+cd "$here"
+"$tsc" -p tsconfig.json
+"$tsc" -p tsconfig.bridge.json --typeRoots "$cache/node_modules/@types"

@@ -1,3 +1,4 @@
+import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 
 const props = {
@@ -27,7 +28,7 @@ const WORKERS = [
 ]
 const FEED = [...Array.from({ length: 6 }, (_, i) => msg(i, 'api')), msg(9, 'api', 'ask')]
 
-function seed(on: Parameters<Parameters<typeof test>[1]>[1], values: Record<string, { shape: string; value: unknown }>) {
+function seed(on: On, values: Record<string, { shape: string; value: unknown }>) {
   let version = 1
   on('state.get', (_, e) => ({ value: { value: values[(e as { key: string }).key], version } }))
   on('state.set', (_, e) => {
@@ -95,7 +96,7 @@ test('a stored view of another shape falls back to the inbox', async ($, on) => 
 
 
 for (const sel of [undefined, 'api', 'missing']) {
-  for (const [key, hotkey] of [['quit', 'q'], ['close', 'x']]) {
+  for (const [key, hotkey] of [['quit', 'q'], ['close', 'x']] as const) {
     test(`${hotkey} closes ${sel ?? 'list'}`, async ($, on) => {
       seed(on, {
         workers: { shape: 'workers-1', value: WORKERS },
@@ -211,7 +212,7 @@ test('the band hides zero chips and exposes c a u navigation', async ($, on) => 
   on('ui.open', (_, e) => { opens.push(e); return { value: { isPlaced: true } } })
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
   for (const key of ['work', 'idle', 'gone']) expect(await ui.find({ type: 'Button', key })).toBeFalsy()
-  for (const [key, hotkey] of [['crew', 'c'], ['next', 'a'], ['unread', 'u']]) {
+  for (const [key, hotkey] of [['crew', 'c'], ['next', 'a'], ['unread', 'u']] as const) {
     expect((await ui.find({ type: 'Button', key }))?.props.hotkey).toBe(hotkey)
     await ui.press({ key })
   }
@@ -243,7 +244,9 @@ test('/crew opens an Escape-closeable pane', async ($, on) => {
   seed(on, {})
   let escape: boolean | undefined
   on('ui.open', (_, e) => { escape = e.closeOnEscape; return { value: { isPlaced: true } } })
-  await $.command.run({ command: 'crew' })
+  await $.command.run({
+    command: 'crew', args: '', origin: { kind: 'plugin', name: 'pi-crew' }, presentation: { isFullscreen: false, columns: 80 },
+  })
   expect(escape).toBe(true)
 })
 

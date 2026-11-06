@@ -156,7 +156,7 @@ Long worker names are clipped in narrow lists; detail actions stay on separate l
 - The worker's launcher starts it in `cwd`, and its brief tells it to stay there. Pi does not enforce that: a model can still `cd` away, which the DONE checks catch.
 - Idle alerts come from Pi's intercom presence (`idle`, `thinking`, `tool:…`), which also carries context %.
 - The bridge loads the client from Pi's own pi-intercom install, so the wire protocol matches the running broker. Nothing is vendored.
-- State lives in `~/.pi-crew/<pane>/` (mode 0700): workers, a short message log, unanswered reports, briefs.
+- State lives in `~/.pi-crew/<pane>/` (mode 0700): workers, a short message log, unanswered reports, briefs. A workers, inbox or asks file that does not parse is renamed to `<name>.bad-<timestamp>` and reported as an error; worker records without a name, id, cwd or model are dropped with an error.
 
 Cleanup is automatic. The pane is for current work, not history:
 
@@ -186,10 +186,14 @@ Cleanup is automatic. The pane is for current work, not history:
 
 ```sh
 bin/test                       # bridge and view logic (node --test with Pi's tsx)
+bin/typecheck                  # mod, bridge and tests with TypeScript 7
 claude plugin test .           # band and pane rendering
 claude plugin validate .
-tsc -p .                       # after the mod has loaded once, for .claude-plugin/types
 ```
+
+`bin/typecheck` needs the mod to have loaded once, for `.claude-plugin/types`. The repo has no `package.json`: it
+installs `typescript@7` and `@types/node` once into `${TMPDIR:-/tmp}/pi-crew-typecheck` (override with
+`PI_CREW_TYPECHECK_DIR`) and needs npm and network on the first run only.
 
 ## License
 
