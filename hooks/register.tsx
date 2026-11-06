@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface as Engine, Register } from 'claude-code'
 
-import type { CrewFilter, CrewLead, CrewMsg, CrewTab, CrewView, CrewWorker } from '../types'
+import type { CrewFilter, CrewMsg, CrewTab, CrewView, CrewWorker } from '../types'
 import {
   COLOR, GLYPH, LABEL, UNREAD, age, bandQuestion, clampText, clip, fold, groups, inboxOrder, matches, nextQuestion, oneLine, tag,
   tally, threadOf, turnText, type Inbound,
@@ -19,7 +19,6 @@ const BRIDGE_ATTEMPTS = 20
 const SUBMIT_ATTEMPTS = 10
 const TICK_MS = 60_000
 
-const lead = atom({ plugin: 'pi-crew', key: 'lead' } as const, null as CrewLead, { shape: 'lead-1' })
 const workers = atom({ plugin: 'pi-crew', key: 'workers' } as const, [] as CrewWorker[], { shape: 'workers-1' })
 const feed = atom({ plugin: 'pi-crew', key: 'feed' } as const, [] as CrewMsg[], { shape: 'feed-1' })
 const START: CrewView = { tab: 'inbox', filter: 'all', showAll: false, questionExpanded: false, collapsed: [] }
@@ -154,7 +153,6 @@ async function onEvent($: Engine, ev: BridgeEvent) {
   switch (ev.type) {
     case 'ready':
       attempt = 0
-      await update($, lead, () => ev.lead)
       await update($, workers, () => ev.workers)
       await update($, feed, () => ev.feed.slice(-FEED_LIMIT))
       $.ui.status(undefined)
@@ -454,9 +452,9 @@ export const register: Register = on => {
             })}
           </Box>
           {w.state !== 'gone' && (
-            <Input key={`reply-${w.name}`} placeholder={`message ${tag(w)} · Enter sends`} submitLabel="send" rows={2} onInput={async () => { await setView($, {}) }} onSubmit={value => reply($, w, value)} />
+            <Input key={`reply-${w.name}`} placeholder={`message ${tag(w)} · Enter sends`} submitLabel="send" rows={2} onInput={async () => { if (v.confirmStop) await setView($, {}) }} onSubmit={value => reply($, w, value)} />
           )}
-          <Box flexDirection="row" flexWrap="wrap"><Text dimColor>{`b back${hidden > 0 || v.showAll ? ' · e more' : ''}${w.agtermSession ? ' · o terminal' : ''}${w.ask ? `${question?.more ? ' · d full question' : ''} · y/n send` : ''} · s ${w.state === 'gone' ? 'forget' : 'stop'} · Tab move · Enter activate · Esc/`}</Text>{closeHint}</Box>
+          <Box flexDirection="row" flexWrap="wrap"><Text dimColor>{`b back${hidden > 0 || v.showAll ? ' · e more' : ''}${w.agtermSession ? ' · o terminal' : ''}${w.ask ? `${question?.more ? ` · d ${v.questionExpanded ? 'collapse' : 'full'} question` : ''} · y/n send` : ''} · s ${w.state === 'gone' ? 'forget' : 'stop'} · Tab move · Enter activate · Esc/`}</Text>{closeHint}</Box>
         </Box>
       )
     }

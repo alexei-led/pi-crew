@@ -23,7 +23,7 @@ export const oneLine = (text: string) => text.replace(/\s+/g, ' ').trim()
 
 export function clip(text: string, max: number): string {
   if (max <= 0) return ''
-  if (max === 1) return text ? '…' : ''
+  if (max === 1) return text.length <= 1 ? text : '…'
   return text.length > max ? `${text.slice(0, max - 1)}…` : text
 }
 
@@ -147,6 +147,9 @@ export function bandQuestion(w: CrewWorker, count: number, now: number, width: n
   const label = `${identity}${name ? ` ${name}` : ''}${suffix}`
   if (label.length <= width) return label
   // If even the age and preview cannot fit, retain as much worker identity as possible.
-  if (identity.length + ` ${age(w.ask.at, now)}: `.length + 1 > width) return clip(`${identity} ${w.name}`, width)
+  if (identity.length + ` ${age(w.ask.at, now)}: `.length + 1 > width) {
+    // Never let the name clip eat the worker number the band reserved room for.
+    return width < identity.length + 2 ? identity : clip(`${identity} ${w.name}`, width)
+  }
   return clip(label, width)
 }

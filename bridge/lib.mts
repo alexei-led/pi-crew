@@ -19,6 +19,8 @@ export const GROUP_NAME = /^[a-z][a-z0-9-]{0,23}$/;
 export const DEFAULT_MODEL = "router/openai-work";
 /** How much of a message the worker record keeps as its preview; the feed keeps it whole. */
 export const PREVIEW_LIMIT = 300;
+/** An open question keeps far more than a preview: the pane's "full question" and `list` show it. */
+export const ASK_LIMIT = 4000;
 /** The feed file is cut back to its newest three quarters past this many lines. */
 export const FEED_LINES = 1000;
 /** Feed lines a bridge sends the mod at start. */
@@ -223,7 +225,7 @@ export function applyIn(w: Worker, msg: Msg): Worker {
   const preview = { id: msg.id, at: msg.at, text: clip(msg.text) };
   const next: Worker = { ...w, last: preview, lastAt: msg.at, unread: w.unread + 1 };
   if (w.state === "gone") return next;
-  if (msg.kind === "ask") return { ...next, state: "ask", ask: preview };
+  if (msg.kind === "ask") return { ...next, state: "ask", ask: { ...preview, text: clip(msg.text, ASK_LIMIT) } };
   if (next.ask) return next;
   return { ...next, state: msg.kind === "done" ? "idle" : "work" };
 }

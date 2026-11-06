@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import {
-  WORKER_NAME, appendLine, prune, applyIn, applyOut, classify, defaultBranch, idleDue, idleMs, launchScript, nextNumber, parseDone,
+  ASK_LIMIT, PREVIEW_LIMIT, WORKER_NAME, appendLine, prune, applyIn, applyOut, classify, defaultBranch, idleDue, idleMs, launchScript, nextNumber, parseDone,
   parseSessionId, readLines, resolveTarget, stableId, trackLive, upgrade, verifyDone, workerBrief, type Git, type Msg, type Worker,
 } from "../bridge/lib.mts";
 
@@ -78,6 +78,14 @@ test("classify reads the Q:/DONE: markers, an intercom ask and a trailing questi
     ["  Q:   spaced  ", false, "ask", "spaced"],
   ];
   for (const [text, expects, kind, out] of cases) assert.deepEqual(classify(text, expects), { kind, text: out }, text);
+});
+
+test("an open question keeps far more than the preview, up to its own limit", () => {
+  const long = "q".repeat(PREVIEW_LIMIT * 3);
+  const w = applyIn(base, msg("ask", long));
+  assert.equal(w.ask?.text, long);
+  assert.equal(w.last?.text.length, PREVIEW_LIMIT);
+  assert.equal(applyIn(base, msg("ask", "q".repeat(ASK_LIMIT + 50))).ask?.text.length, ASK_LIMIT);
 });
 
 test("worker state: ask opens and stays open until the lead answers; done goes idle; gone stays gone", () => {

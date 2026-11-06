@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
-import { age, checksLine, clampText, clip, fold, groups, inboxOrder, nextQuestion, tally, turnHead, turnText } from "../hooks/model.ts";
+import { age, bandQuestion, checksLine, clampText, clip, fold, groups, inboxOrder, nextQuestion, tally, turnHead, turnText } from "../hooks/model.ts";
 import type { CrewWorker } from "../types/index.d.ts";
 
 const w = (name: string, n: number, more: Partial<CrewWorker> = {}): CrewWorker => ({
@@ -50,6 +50,20 @@ test("clampText wraps long lines and cuts at the line budget", () => {
   assert.equal(clip("hi", 3), "hi");
   assert.equal(clip("hello", 0), "");
   assert.equal(clip("hello", -1), "");
+});
+
+test("clip at width 1 keeps a one-character text and marks anything longer", () => {
+  assert.equal(clip("x", 1), "x");
+  assert.equal(clip("xy", 1), "…");
+  assert.equal(clip("", 1), "");
+});
+
+test("bandQuestion keeps the worker number when only the identity fits", () => {
+  const api = w("api", 1, { state: "ask", ask: { id: "q", at: 0, text: "Use Postgres?" } });
+  assert.equal(bandQuestion(api, 1, 0, 3), "◆ 1");
+  assert.equal(bandQuestion(api, 2, 0, 6), "◆2 · 1");
+  assert.equal(bandQuestion(api, 1, 0, 2), "◆1");
+  assert.equal(bandQuestion(w("x", 1, { state: "ask", ask: { id: "q", at: 0, text: "go?" } }), 1, 0, 120), "◆ 1 x now: go?");
 });
 
 test("turnHead uses the same glyph, number and name as the pane", () => {

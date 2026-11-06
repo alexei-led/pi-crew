@@ -34,8 +34,6 @@ export type CrewMsg = {
   replyTo?: string
 }
 
-export type CrewLead = { name: string; id: string } | null
-
 export type CrewFilter = 'all' | CrewState
 export type CrewTab = 'inbox' | 'crew'
 
@@ -53,7 +51,6 @@ export type CrewView = {
 declare module 'claude-code' {
   interface PluginState {
     'pi-crew': {
-      lead: Shaped<CrewLead>
       workers: Shaped<CrewWorker[]>
       feed: Shaped<CrewMsg[]>
       view: Shaped<CrewView>
