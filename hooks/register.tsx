@@ -20,7 +20,7 @@ const SUBMIT_ATTEMPTS = 10
 const TICK_MS = 60_000
 
 const lead = atom({ plugin: 'pi-crew', key: 'lead' } as const, null as CrewLead, { shape: 'lead-1' })
-const workers = atom({ plugin: 'pi-crew', key: 'workers' } as const, [] as CrewWorker[], { shape: 'workers-2' })
+const workers = atom({ plugin: 'pi-crew', key: 'workers' } as const, [] as CrewWorker[], { shape: 'workers-1' })
 const feed = atom({ plugin: 'pi-crew', key: 'feed' } as const, [] as CrewMsg[], { shape: 'feed-1' })
 const START: CrewView = { tab: 'inbox', filter: 'all', showAll: false, questionExpanded: false, collapsed: [] }
 const view = atom({ plugin: 'pi-crew', key: 'view' } as const, START, { shape: 'view-3' })
@@ -292,7 +292,7 @@ export const register: Register = on => {
     const cols = e.props.bodyColumns
     const compact = cols < 80
     const crewLabel = `crew ${t.crew}`
-    const question = q?.ask ? `${GLYPH.ask} ${tag(q)} ${age(q.ask.at, now)}: ${oneLine(q.ask.text)}` : ''
+    const question = q?.ask ? `${GLYPH.ask} ${t.ask > 1 ? `${t.ask} · ` : ''}${tag(q)} ${age(q.ask.at, now)}: ${oneLine(q.ask.text)}` : ''
     const chips = [
       { key: 'unread', count: t.unread, glyph: UNREAD, word: 'new', hotkey: 'u', tab: 'inbox' as const, filter: 'all' as const },
       { key: 'work', count: t.work, glyph: GLYPH.work, word: LABEL.work, tab: 'crew' as const, filter: 'work' as const },
@@ -312,11 +312,13 @@ export const register: Register = on => {
         <Button plain hotkey="c" key="crew" label={crewLabel} onPress={() => openPane($, { tab: 'crew', filter: 'all' })} />
         {visible.map(c => <Box key={c.key} flexDirection="row">
           <Text dimColor> · </Text>
-          <Button plain hotkey={c.hotkey} key={c.key} label={c.label} onPress={() => openPane($, { tab: c.tab, filter: c.filter })} />
+          <Button plain hotkey={c.hotkey} key={c.key} label={c.label} onPress={() => openPane($, { tab: c.tab, filter: c.filter })}>
+            <Text color={c.key === 'work' ? COLOR.work : c.key === 'unread' ? 'cyan' : undefined} dimColor={c.key === 'gone'}>{c.label}</Text>
+          </Button>
         </Box>)}
         {q?.ask && <Text dimColor> · </Text>}
-        {q?.ask && <Button plain hotkey="a" key="next" onPress={() => openPane($, { tab: 'inbox', filter: 'ask' }, q)}>
-          {clip(question, Math.max(1, cols - used - 6))}
+        {q?.ask && <Button plain hotkey="a" key="next" label="answer oldest question" onPress={() => openPane($, { tab: 'inbox', filter: 'ask' }, q)}>
+          <Text color={COLOR.ask}>{clip(question, Math.max(1, cols - used - 6))}</Text>
         </Button>}
       </Box>
     )

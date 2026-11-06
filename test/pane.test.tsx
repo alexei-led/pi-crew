@@ -39,7 +39,7 @@ function seed(on: Parameters<Parameters<typeof test>[1]>[1], values: Record<stri
 }
 
 test('the band counts states and shows the oldest question', async ($, on) => {
-  seed(on, { workers: { shape: 'workers-2', value: WORKERS } })
+  seed(on, { workers: { shape: 'workers-1', value: WORKERS } })
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect((await ui.find({ type: 'Button', key: 'next' }))?.text).toMatch(/◆ 1 api 1m: Use Postgres\?/)
   expect(await ui.find({ type: 'Button', key: 'gone' })).toBeTruthy()
@@ -58,7 +58,7 @@ test('the band stays hidden with no workers', async ($, on) => {
 })
 
 test('the inbox lists the asking worker first', async ($, on) => {
-  seed(on, { workers: { shape: 'workers-2', value: WORKERS } })
+  seed(on, { workers: { shape: 'workers-1', value: WORKERS } })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   const rows = (await ui.findAll({ type: 'Button' })).filter(b => String(b.key).startsWith('w-'))
   expect(rows.map(r => r.key)).toEqual(['w-api', 'w-web', 'w-old'])
@@ -67,7 +67,7 @@ test('the inbox lists the asking worker first', async ($, on) => {
 
 test('a worker shows its question and only the latest three messages', async ($, on) => {
   seed(on, {
-    workers: { shape: 'workers-2', value: WORKERS },
+    workers: { shape: 'workers-1', value: WORKERS },
     feed: { shape: 'feed-1', value: FEED },
     view: { shape: 'view-3', value: { tab: 'inbox', filter: 'all', sel: 'api', showAll: false, questionExpanded: false, collapsed: [] } },
   })
@@ -84,7 +84,7 @@ test('a worker shows its question and only the latest three messages', async ($,
 
 test('a stored view of another shape falls back to the inbox', async ($, on) => {
   seed(on, {
-    workers: { shape: 'workers-2', value: WORKERS },
+    workers: { shape: 'workers-1', value: WORKERS },
     view: { shape: 'view-1', value: { tab: 'feed', filter: 'all', sel: 'api', showAll: true, collapsed: [] } },
   })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
@@ -98,7 +98,7 @@ for (const sel of [undefined, 'api', 'missing']) {
   for (const [key, hotkey] of [['quit', 'q'], ['close', 'x']]) {
     test(`${hotkey} closes ${sel ?? 'list'}`, async ($, on) => {
       seed(on, {
-        workers: { shape: 'workers-2', value: WORKERS },
+        workers: { shape: 'workers-1', value: WORKERS },
         view: { shape: 'view-3', value: { tab: 'inbox', filter: 'all', sel, showAll: false, questionExpanded: false, collapsed: [] } },
       })
       let closed = ''
@@ -113,7 +113,7 @@ for (const sel of [undefined, 'api', 'missing']) {
 }
 
 test('word filters use a n w i s', async ($, on) => {
-  const values = { workers: { shape: 'workers-2', value: [...WORKERS, worker('quiet', 4, { state: 'idle' })] } }
+  const values = { workers: { shape: 'workers-1', value: [...WORKERS, worker('quiet', 4, { state: 'idle' })] } }
   seed(on, values)
   for (const [filter, key, label, names] of [
     ['all', 'a', 'all 4', ['w-api', 'w-web', 'w-quiet', 'w-old']],
@@ -139,7 +139,7 @@ test('word filters use a n w i s', async ($, on) => {
 for (const state of ['work', 'gone']) {
   test(`${state} requires s then c, and other actions cancel`, async ($, on) => {
     seed(on, {
-      workers: { shape: 'workers-2', value: [worker('api', 1, { state })] },
+      workers: { shape: 'workers-1', value: [worker('api', 1, { state })] },
       view: { shape: 'view-3', value: { tab: 'crew', filter: 'all', sel: 'api', showAll: false, questionExpanded: false, collapsed: [] } },
     })
     let attempts = 0
@@ -174,7 +174,7 @@ for (const state of ['work', 'gone']) {
 test('a cut question expands and collapses with d', async ($, on) => {
   const text = 'question '.repeat(100) + 'THE END'
   seed(on, {
-    workers: { shape: 'workers-2', value: [worker('api', 1, { state: 'ask', ask: { id: 'q', at: 0, text } })] },
+    workers: { shape: 'workers-1', value: [worker('api', 1, { state: 'ask', ask: { id: 'q', at: 0, text } })] },
     view: { shape: 'view-3', value: { tab: 'crew', filter: 'ask', sel: 'api', showAll: false, questionExpanded: false, collapsed: [] } },
   })
   let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
@@ -194,7 +194,7 @@ test('a cut question expands and collapses with d', async ($, on) => {
 
 test('40 columns clips long worker tags before the age and preview', async ($, on) => {
   const name = 'a'.repeat(32)
-  seed(on, { workers: { shape: 'workers-2', value: [worker(name, 1)] } })
+  seed(on, { workers: { shape: 'workers-1', value: [worker(name, 1)] } })
   const ui = await $.ui.mount({ ...PANE, props: { ...props, bodyColumns: 40, placement: 'inline' }, surface: 'terminal' })
   const row = await ui.find({ key: `w-${name}` })
   expect(row?.text).toMatch(/^● 1 a+…/)
@@ -203,7 +203,7 @@ test('40 columns clips long worker tags before the age and preview', async ($, o
 })
 
 test('the band hides zero chips and exposes c a u navigation', async ($, on) => {
-  seed(on, { workers: { shape: 'workers-2', value: [WORKERS[0]] } })
+  seed(on, { workers: { shape: 'workers-1', value: [WORKERS[0]] } })
   const opens: Array<{ id: string; closeOnEscape?: boolean }> = []
   on('ui.open', (_, e) => { opens.push(e); return { value: { isPlaced: true } } })
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
@@ -218,7 +218,7 @@ test('the band hides zero chips and exposes c a u navigation', async ($, on) => 
 })
 
 test('the narrow band drops secondary chips before the question', async ($, on) => {
-  seed(on, { workers: { shape: 'workers-2', value: WORKERS } })
+  seed(on, { workers: { shape: 'workers-1', value: WORKERS } })
   const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 40 }, surface: 'terminal' })
   expect(await ui.find({ key: 'work' })).toBeFalsy()
   expect((await ui.find({ key: 'next' }))?.text).toMatch(/^◆ 1 api 1m:/)
@@ -238,7 +238,7 @@ test('/crew opens an Escape-closeable pane', async ($, on) => {
 
 test('back keeps the Crew tab and filter, and disarms stop', async ($, on) => {
   const values = {
-    workers: { shape: 'workers-2', value: WORKERS },
+    workers: { shape: 'workers-1', value: WORKERS },
     view: { shape: 'view-3', value: { tab: 'crew', filter: 'ask', sel: 'api', showAll: false, questionExpanded: false, collapsed: [], confirmStop: 'api' } },
   }
   seed(on, values)
@@ -253,7 +253,7 @@ test('back keeps the Crew tab and filter, and disarms stop', async ($, on) => {
 test('done messages are neutral, and narrow detail keeps actions separate from identity', async ($, on) => {
   const name = 'a'.repeat(32)
   seed(on, {
-    workers: { shape: 'workers-2', value: [worker(name, 1, { agtermSession: 'session' })] },
+    workers: { shape: 'workers-1', value: [worker(name, 1, { agtermSession: 'session' })] },
     feed: { shape: 'feed-1', value: [msg(1, name, 'done')] },
     view: { shape: 'view-3', value: { tab: 'inbox', filter: 'all', sel: name, showAll: false, questionExpanded: false, collapsed: [] } },
   })
@@ -267,11 +267,39 @@ test('done messages are neutral, and narrow detail keeps actions separate from i
 })
 
 test('the wide band labels nonzero states and the compact band shortens them', async ($, on) => {
-  seed(on, { workers: { shape: 'workers-2', value: [worker('a', 1), worker('b', 2, { state: 'idle' }), worker('c', 3, { state: 'gone' })] } })
+  seed(on, { workers: { shape: 'workers-1', value: [worker('a', 1), worker('b', 2, { state: 'idle' }), worker('c', 3, { state: 'gone' })] } })
   let ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
   for (const [key, label] of [['work', '● 1 working'], ['idle', '○ 1 idle'], ['gone', '✕ 1 stopped']]) expect((await ui.find({ type: 'Button', key }))?.text).toBe(label)
   await ui.unmount()
   ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 50 }, surface: 'terminal' })
   expect((await ui.find({ type: 'Button', key: 'work' }))?.text).toBe('●1')
+  await ui.unmount()
+})
+
+test('the band counts open questions and answers the oldest in ask color', async ($, on) => {
+  const values: Record<string, { shape: string; value: unknown }> = {
+    workers: { shape: 'workers-1', value: [
+      worker('later', 4, { state: 'ask', ask: { id: 'later', at: 30_000, text: 'Another question?' } }),
+      WORKERS[0],
+    ] },
+  }
+  seed(on, values)
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect((await ui.find({ type: 'Button', key: 'next' }))?.text).toBe('◆ 2 · 1 api 1m: Use Postgres?')
+  expect((await ui.find({ type: 'Text', text: /^◆ 2 · 1 api/ }))?.props.color).toBe('yellow')
+  expect((await ui.find({ type: 'Button', key: 'next' }))?.props.hotkey).toBe('a')
+  await ui.press({ key: 'next' })
+  expect(values.view?.value).toMatchObject({ tab: 'inbox', filter: 'ask', sel: 'api' })
+  await ui.unmount()
+})
+
+test('band state colors reinforce the glyphs and words', async ($, on) => {
+  seed(on, { workers: { shape: 'workers-1', value: WORKERS } })
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect((await ui.find({ type: 'Text', text: /^◆ 1 api/ }))?.props.color).toBe('yellow')
+  expect((await ui.find({ type: 'Text', text: /^● 1 working$/ }))?.props.color).toBe('green')
+  expect((await ui.find({ type: 'Text', text: /^✉ 1 new$/ }))?.props.color).toBe('cyan')
+  expect((await ui.find({ type: 'Text', text: /^✕ 1 stopped$/ }))?.props.dimColor).toBe(true)
   await ui.unmount()
 })

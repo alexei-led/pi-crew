@@ -79,7 +79,7 @@ The band above the prompt shows the crew at a glance. Click a part to open the p
 c: crew 3 · u: ✉ 2 new · ● 1 working · ○ 1 idle · a: ◆ 1 api 4m: Should /health check the database too?
 ```
 
-Zero counts are hidden. In a narrow band, counts become compact (`●1`) and secondary chips drop before the question. The question stays at normal contrast and opens its worker’s thread.
+Zero counts are hidden. In a narrow band, counts become compact (`●1`) and secondary chips drop before the question. The question stays at normal contrast in yellow and opens its worker’s thread. With several open questions, it shows their count before the oldest worker (`◆ 2 · 1 api 4m: …`). Working is green, unread is cyan, and stopped is dim; glyphs and words carry the same meaning without color.
 
 `/crew` opens the pane: who needs you, what each worker is doing, and its latest few messages. Claude Code places it: docked beside the transcript in the fullscreen layout from 110 columns, otherwise inline above the prompt. The main-screen layout (`CLAUDE_CODE_NO_FLICKER=0`, and tmux by default) always places it inline.
 
