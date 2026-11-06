@@ -1,5 +1,5 @@
 // Pure view logic shared by the band, the pane and the turn text: one vocabulary of glyphs, numbers and names.
-import type { CrewFilter, CrewInbound, CrewMsg, CrewState, CrewWorker } from '../types'
+import type { CrewFilter, CrewInbound, CrewMsg, CrewState, CrewTab, CrewWorker } from '../types'
 
 export const GLYPH: Record<CrewState, string> = { ask: '◆', work: '●', idle: '○', gone: '✕' }
 export const COLOR: Record<CrewState, string | undefined> = { ask: 'yellow', work: 'green', idle: undefined, gone: 'gray' }
@@ -141,4 +141,63 @@ export function bandQuestion(w: CrewWorker, count: number, now: number, width: n
     return width < identity.length + 2 ? identity : clip(`${identity} ${w.name}`, width)
   }
   return clip(label, width)
+}
+
+export type BandChip = {
+  key: 'unread' | 'work' | 'idle' | 'gone'
+  label: string
+  /** Only the unread chip has a hotkey. */
+  hotkey?: string
+  tab: CrewTab
+  filter: CrewFilter
+}
+
+export type BandLayout = {
+  crew: { label: string; hotkey?: string }
+  separator: string
+  /** Empty when there is no open question or no room for even its worker number. */
+  question: string
+  chips: BandChip[]
+}
+
+/**
+ * The band's width budget over `cols` columns: crew first, then the oldest question (which secondary chips cannot
+ * shorten), then the nonzero state chips in full or compact form. Budgets use UTF-16 length, not terminal cells;
+ * wide CJK/emoji can still misfit.
+ */
+export function bandLayout(t: Tally, q: CrewWorker | undefined, now: number, cols: number): BandLayout {
+  const crewHotkey = cols >= 3 ? 'c' : undefined
+  const crewLabel = clip(`crew ${t.crew}`, Math.max(0, cols - (crewHotkey ? 3 : 0)))
+  const crewWidth = crewLabel.length + (crewHotkey ? 3 : 0)
+  const separator = cols >= crewWidth + 3 + 3 + (q ? String(q.n).length + 2 : 0) ? ' · ' : ' '
+  const questionOverhead = q ? separator.length + 3 : 0
+  const questionFloor = q ? `${t.ask > 1 ? `${GLYPH.ask}${t.ask} · ` : `${GLYPH.ask} `}${q.n}` : ''
+  const questionFull = q ? bandQuestion(q, t.ask, now, Number.MAX_SAFE_INTEGER) : ''
+  let remaining = Math.max(0, cols - crewWidth - questionOverhead)
+  const candidates = [
+    { key: 'unread', count: t.unread, glyph: UNREAD, word: 'new', hotkey: 'u', tab: 'inbox', filter: 'all' },
+    { key: 'work', count: t.work, glyph: GLYPH.work, word: LABEL.work, tab: 'crew', filter: 'work' },
+    { key: 'idle', count: t.idle, glyph: GLYPH.idle, word: LABEL.idle, tab: 'crew', filter: 'idle' },
+    { key: 'gone', count: t.gone, glyph: GLYPH.gone, word: LABEL.gone, tab: 'crew', filter: 'gone' },
+  ] as const
+  const chips = candidates
+    .filter(c => c.count > 0)
+    .flatMap((c): BandChip[] => {
+      // Protect question identity and unread first; secondary counts cannot shorten the question.
+      const reserve = q ? (c.key === 'unread' ? questionFloor.length : questionFull.length) : 0
+      const hotkey = 'hotkey' in c ? c.hotkey : undefined
+      const overhead = separator.length + (hotkey ? 3 : 0)
+      const full = `${c.glyph} ${c.count} ${c.word}`
+      const compact = `${c.glyph}${c.count}`
+      const label = [full, compact].find(text => text.length + overhead + reserve <= remaining)
+      if (!label) return []
+      remaining -= label.length + overhead
+      return [{ key: c.key, label, hotkey, tab: c.tab, filter: c.filter }]
+    })
+  return {
+    crew: { label: crewLabel, hotkey: crewHotkey },
+    separator,
+    question: q ? bandQuestion(q, t.ask, now, remaining) : '',
+    chips,
+  }
 }
