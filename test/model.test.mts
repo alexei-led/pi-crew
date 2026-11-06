@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
-import { age, bandQuestion, checksLine, clampText, clip, fold, groups, inboxOrder, nextQuestion, tally, turnHead, turnText } from "../hooks/model.ts";
+import { age, bandLayout, bandQuestion, checksLine, clampText, clip, fold, groups, inboxOrder, nextQuestion, tally, turnHead, turnText } from "../hooks/model.ts";
 import type { CrewWorker } from "../types/index.d.ts";
 
 const w = (name: string, n: number, more: Partial<CrewWorker> = {}): CrewWorker => ({
@@ -107,4 +107,65 @@ test("idle turn instruction follows the headline before metadata", () => {
   assert.equal(lines[1], 'Check it: its screen below, mcp__pi-crew__send to nudge "api", or mcp__pi-crew__stop.');
   assert.equal(lines[2], "intercom id session, cwd /w, message idle");
   assert.deepEqual(lines.slice(3), ["", "screen"]);
+});
+
+const layout = (ws: CrewWorker[], cols: number) => bandLayout(tally(ws), nextQuestion(ws), 60_000, cols);
+const asking = (name: string, n: number, more: Partial<CrewWorker> = {}) =>
+  w(name, n, { state: "ask", ask: { id: `q${n}`, at: n - 1, text: "Use Postgres?" }, ...more });
+const chipLabels = (l: ReturnType<typeof layout>) => l.chips.map(c => [c.key, c.label]);
+
+test("band: wide layout labels every nonzero chip in full after the question", () => {
+  const l = layout([asking("api", 1, { unread: 1 }), w("web", 2), w("old", 3, { state: "gone" })], 120);
+  assert.deepEqual(l.crew, { label: "crew 2", hotkey: "c" });
+  assert.equal(l.separator, " · ");
+  assert.equal(l.question, "◆ 1 api 1m: Use Postgres?");
+  assert.deepEqual(chipLabels(l), [["unread", "✉ 1 new"], ["work", "● 1 working"], ["gone", "✕ 1 stopped"]]);
+});
+
+test("band: chips carry the tab and filter they open", () => {
+  const l = layout([w("a", 1, { unread: 1 }), w("b", 2), w("c", 3, { state: "idle" }), w("d", 4, { state: "gone" })], 120);
+  assert.deepEqual(l.chips.map(c => [c.key, c.hotkey, c.tab, c.filter]), [
+    ["unread", "u", "inbox", "all"],
+    ["work", undefined, "crew", "work"],
+    ["idle", undefined, "crew", "idle"],
+    ["gone", undefined, "crew", "gone"],
+  ]);
+});
+
+test("band: width cases", () => {
+  const two = [
+    asking("a".repeat(32), 1, { unread: 2 }),
+    asking("later", 2),
+    w("working", 3), w("idle", 4, { state: "idle" }), w("gone", 5, { state: "gone" }),
+  ];
+  const one = [asking("api", 1, { unread: 1 }), w("web", 2), w("old", 3, { state: "gone" })];
+  const noQuestion = [w("a", 1), w("b", 2, { state: "idle" }), w("c", 3, { state: "gone" })];
+  const cases: Array<{ name: string; ws: CrewWorker[]; cols: number; crew: string; hotkey?: string; separator: string; question: string; chips: string[][] }> = [
+    { name: "no question, compact chips at 20, the last one dropped", ws: noQuestion, cols: 20, crew: "crew 2", hotkey: "c", separator: " · ", question: "", chips: [["work", "●1"], ["idle", "○1"]] },
+    { name: "no question, full chips at 80", ws: noQuestion, cols: 80, crew: "crew 2", hotkey: "c", separator: " · ", question: "", chips: [["work", "● 1 working"], ["idle", "○ 1 idle"], ["gone", "✕ 1 stopped"]] },
+    { name: "40 columns: unread kept, secondary chips dropped", ws: one, cols: 40, crew: "crew 2", hotkey: "c", separator: " · ", question: "◆ 1 … 1m: U…", chips: [["unread", "✉ 1 new"]] },
+    { name: "two long-named questions at 15 columns", ws: two, cols: 15, crew: "crew 4", hotkey: "c", separator: " ", question: "◆2", chips: [] },
+    { name: "two long-named questions at 40 columns", ws: two, cols: 40, crew: "crew 4", hotkey: "c", separator: " · ", question: "◆2 · 1 … 1m…", chips: [["unread", "✉ 2 new"]] },
+    { name: "unread never shortens the question below its number", ws: [asking("api", 1, { unread: 2 })], cols: 31, crew: "crew 1", hotkey: "c", separator: " · ", question: "◆ 1", chips: [["unread", "✉ 2 new"]] },
+    { name: "no hotkey and a clipped label under 3 columns", ws: noQuestion, cols: 2, crew: "c…", hotkey: undefined, separator: " ", question: "", chips: [] },
+  ];
+  for (const c of cases) {
+    const l = layout(c.ws, c.cols);
+    assert.deepEqual({ crew: l.crew.label, hotkey: l.crew.hotkey, separator: l.separator, question: l.question, chips: chipLabels(l) },
+      { crew: c.crew, hotkey: c.hotkey, separator: c.separator, question: c.question, chips: c.chips }, c.name);
+  }
+});
+
+test("band: the layout never exceeds the columns it was given", () => {
+  const ws = [asking("a".repeat(32), 1, { unread: 2 }), asking("later", 2), w("working", 3), w("idle", 4, { state: "idle" }), w("gone", 5, { state: "gone" })];
+  for (const cols of [15, 20, 40, 79, 80, 120]) {
+    const l = layout(ws, cols);
+    const parts = [
+      l.crew.label.length + (l.crew.hotkey ? 3 : 0),
+      ...(l.question ? [l.question.length] : []),
+      ...l.chips.map(c => c.label.length + (c.hotkey ? 3 : 0)),
+    ];
+    const total = parts.reduce((a, b) => a + b, 0) + (parts.length - 1) * l.separator.length;
+    assert.ok(total <= cols, `${cols} columns: ${total}`);
+  }
 });
