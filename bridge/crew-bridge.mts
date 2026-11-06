@@ -18,6 +18,7 @@ import {
   defaultBranch, idleDue, idleMs, intercomPkg, launchScript, nextNumber, parseDone, parseSessionId, quietSince, readLines, resolveTarget, stableId,
   trackLive, upgrade, verifyDone, workerBrief, type Git, type Live, type Msg, type SessionInfo, type Worker,
 } from "./lib.mts";
+import type { BridgeEvent, CrewInbound as Inbound, CrewRequest as Request } from "../types/index.d.ts";
 
 const run = promisify(execFile);
 const REQUEST_LIMIT = 1 << 20;
@@ -66,27 +67,6 @@ function removeStaleCrews(keep: string) {
   }
 }
 
-type Request =
-  | { op: "list" }
-  | { op: "send"; to: string; text: string; replyTo?: string }
-  | { op: "spawn"; name: string; cwd: string; model?: string; task?: string; group?: string; allowDefaultBranch?: boolean }
-  | { op: "stop"; name: string }
-  | { op: "read"; name: string }
-  | { op: "focus"; name: string }
-  | { op: "ack"; id: string };
-
-type Inbound = {
-  type: "message";
-  from: { id: string; name?: string; cwd: string; worker?: string };
-  id: string;
-  replyTo?: string;
-  expectsReply: boolean;
-  kind: Msg["kind"] | "idle";
-  text: string;
-  /** For a worker's DONE: what the bridge found checking its claims against git. */
-  checks?: { ok: boolean; notes: string[] };
-};
-
 function writeJson(path: string, value: unknown) {
   const tmp = `${path}.tmp`;
   writeFileSync(tmp, JSON.stringify(value, null, 2), { mode: 0o600 });
@@ -114,7 +94,9 @@ async function serve(key: string, leadName: string) {
   const inboxFile = join(dir, "inbox.json");
   const feedFile = join(dir, "feed.jsonl");
   const workers = new Map<string, Worker>(upgrade(readJson<Partial<Worker>[]>(workersFile, [])).map(w => [w.name, w]));
-  const emit = (event: Record<string, unknown>) => process.stdout.write(`${JSON.stringify(event)}\n`);
+  const emit = (event: BridgeEvent): void => {
+    process.stdout.write(`${JSON.stringify(event)}\n`);
+  };
   const saveWorkers = () => {
     writeJson(workersFile, [...workers.values()]);
     emit({ type: "workers", workers: [...workers.values()] });

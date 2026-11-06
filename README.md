@@ -186,10 +186,14 @@ Cleanup is automatic. The pane is for current work, not history:
 
 ```sh
 bin/test                       # bridge and view logic (node --test with Pi's tsx)
+bin/typecheck                  # mod, bridge and tests with TypeScript 7
 claude plugin test .           # band and pane rendering
 claude plugin validate .
-tsc -p .                       # after the mod has loaded once, for .claude-plugin/types
 ```
+
+`bin/typecheck` needs the mod to have loaded once, for `.claude-plugin/types`. The repo has no `package.json`: it
+installs `typescript@7` and `@types/node` once into `${TMPDIR:-/tmp}/pi-crew-typecheck` (override with
+`PI_CREW_TYPECHECK_DIR`) and needs npm and network on the first run only.
 
 ## License
 

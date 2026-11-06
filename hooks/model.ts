@@ -1,5 +1,5 @@
 // Pure view logic shared by the band, the pane and the turn text: one vocabulary of glyphs, numbers and names.
-import type { CrewFilter, CrewMsg, CrewState, CrewWorker } from '../types'
+import type { CrewFilter, CrewInbound, CrewMsg, CrewState, CrewWorker } from '../types'
 
 export const GLYPH: Record<CrewState, string> = { ask: '◆', work: '●', idle: '○', gone: '✕' }
 export const COLOR: Record<CrewState, string | undefined> = { ask: 'yellow', work: 'green', idle: undefined, gone: 'gray' }
@@ -105,21 +105,10 @@ export function turnHead(w: CrewWorker | undefined, kind: CrewMsg['kind'] | 'idl
   return `${kind === 'ask' ? GLYPH.ask : kind === 'done' ? GLYPH.idle : GLYPH.work} Worker ${tag(w)} ${verb}`
 }
 
-export type Inbound = {
-  type: 'message'
-  from: { id: string; name?: string; cwd: string; worker?: string }
-  id: string
-  replyTo?: string
-  expectsReply: boolean
-  kind: CrewMsg['kind'] | 'idle'
-  text: string
-  checks?: { ok: boolean; notes: string[] }
-}
-
 /** Human-readable turn: the headline stays searchable independently of transport metadata. */
-export function turnText(worker: CrewWorker | undefined, ev: Inbound, notes?: string[]): string {
+export function turnText(worker: CrewWorker | undefined, ev: CrewInbound, notes?: string[]): string {
   const peer = ev.from.worker ?? ev.from.name ?? ev.from.id
-  const checks = checksLine(ev.checks)
+  const checks = checksLine(ev.kind === 'done' ? ev.checks : undefined)
   return [
     turnHead(worker, ev.kind, peer),
     ...(ev.kind === 'ask' ? [`Answer with mcp__pi-crew__send to "${peer}" replyTo "${ev.id}".`] : []),

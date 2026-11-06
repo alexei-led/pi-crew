@@ -4,6 +4,8 @@ import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import type { CrewMsg, CrewWorker } from "../types/index.d.ts";
+
 type Env = Record<string, string | undefined>;
 
 /** The pi-intercom package Pi installed; the bridge speaks its exact wire protocol. */
@@ -48,40 +50,9 @@ export function stableId(...parts: string[]): string {
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
 
-/** work: on a task · ask: waiting for the lead · idle: done or no task · gone: stopped. */
-export type State = "work" | "ask" | "idle" | "gone";
-export type Preview = { id: string; at: number; text: string };
-/** One message in the feed. `worker` is unset for a session the lead did not spawn. */
-export type Msg = {
-  id: string;
-  at: number;
-  kind: "ask" | "done" | "report" | "out";
-  text: string;
-  worker?: string;
-  peer: string;
-  replyTo?: string;
-};
-
-export type Worker = {
-  name: string;
-  id: string;
-  cwd: string;
-  model: string;
-  allowDefaultBranch?: boolean;
-  agtermSession?: string;
-  /** Spawn order: the number the UI shows next to the name. Not reused while the record exists. */
-  n: number;
-  group?: string;
-  state: State;
-  unread: number;
-  startedAt: number;
-  lastAt: number;
-  last?: Preview;
-  /** The open question, until the lead answers it. */
-  ask?: Preview;
-  /** When the lead was last told this worker sits idle; one alert per idle stretch. */
-  alertedAt?: number;
-};
+// The records and the protocol are declared once, in types/index.d.ts, for the bridge and the mod alike.
+export type Worker = CrewWorker;
+export type Msg = CrewMsg;
 
 /**
  * What the broker's presence says about a session: Pi's lifecycle status, since when, and context use. `fresh`: first

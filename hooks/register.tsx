@@ -1,10 +1,10 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface as Engine, Register } from 'claude-code'
 
-import type { CrewFilter, CrewMsg, CrewTab, CrewView, CrewWorker } from '../types'
+import type { BridgeEvent, CrewFilter, CrewInbound, CrewMsg, CrewRequest, CrewTab, CrewView, CrewWorker } from '../types'
 import {
   COLOR, GLYPH, LABEL, UNREAD, age, bandQuestion, clampText, clip, fold, groups, inboxOrder, matches, nextQuestion, oneLine, tag,
-  tally, threadOf, turnText, type Inbound,
+  tally, threadOf, turnText,
 } from './model'
 
 const PLUGIN = 'pi-crew'
@@ -25,15 +25,6 @@ const START: CrewView = { tab: 'inbox', filter: 'all', showAll: false, questionE
 const view = atom({ plugin: 'pi-crew', key: 'view' } as const, START, { shape: 'view-3' })
 const tick = atom({ plugin: 'pi-crew', key: 'tick' } as const, 0, { shape: 'tick-1' })
 const seen = atom({ plugin: 'pi-crew', key: 'seen' } as const, [] as string[], { shape: 'seen-1' })
-
-type BridgeEvent =
-  | { type: 'ready'; lead: { name: string; id: string }; workers: CrewWorker[]; feed: CrewMsg[] }
-  | { type: 'workers'; workers: CrewWorker[] }
-  | { type: 'feed'; msg: CrewMsg }
-  | { type: 'feedset'; feed: CrewMsg[] }
-  | { type: 'roster' }
-  | Inbound
-  | { type: 'error'; error: string }
 
 const TOOLS = [
   {
@@ -87,7 +78,10 @@ const TOOLS = [
   },
 ] as const
 
-const OPS: Record<string, (input: Record<string, unknown>) => Record<string, unknown>> = {
+type ToolOp = 'spawn' | 'send' | 'list' | 'stop'
+type ToolRequest<K extends ToolOp> = Extract<CrewRequest, { op: K }>
+// The engine checks a tool call against its inputSchema, so each builder sees the fields of its own request.
+const OPS: { [K in ToolOp]: (input: Omit<ToolRequest<K>, 'op'>) => ToolRequest<K> } = {
   spawn: input => ({
     op: 'spawn', name: input.name, cwd: input.cwd, model: input.model, task: input.task, group: input.group,
     allowDefaultBranch: input.allowDefaultBranch,
@@ -106,7 +100,7 @@ let submitting: Promise<void> = Promise.resolve()
 // What the user wrote to a worker from the pane since its last report: the next turn tells the model.
 const panelNotes = new Map<string, string[]>()
 
-async function call($: Engine, request: Record<string, unknown>): Promise<{ ok: boolean; error?: string; raw: string }> {
+async function call($: Engine, request: CrewRequest): Promise<{ ok: boolean; error?: string; raw: string }> {
   const ran = await $.process.run([bridgeBin, 'call', '--key', bridgeKey, JSON.stringify(request)])
   const raw = ran.stdout.trim() || JSON.stringify({ ok: false, error: ran.stderr.trim() || `exit ${ran.exitCode}` })
   try {
@@ -124,7 +118,7 @@ async function resolveKey($: Engine): Promise<string> {
   return raw.replace(/[^A-Za-z0-9-]/g, '').slice(0, 64)
 }
 
-async function deliver($: Engine, ev: Inbound) {
+async function deliver($: Engine, ev: CrewInbound) {
   if ((await read($, seen)).includes(ev.id)) {
     await call($, { op: 'ack', id: ev.id })
     return
@@ -166,12 +160,16 @@ async function onEvent($: Engine, ev: BridgeEvent) {
     case 'feedset':
       await update($, feed, () => ev.feed.slice(-FEED_LIMIT))
       return
+    case 'roster':
+      return
     case 'error':
       $.ui.log(`pi-crew: ${ev.error}`, { to: 'debug' })
       return
     case 'message':
       submitting = submitting.then(() => deliver($, ev)).catch(error => $.ui.log(`pi-crew: deliver: ${String(error)}`, { to: 'debug' }))
       return
+    default:
+      ev satisfies never
   }
 }
 
@@ -188,7 +186,7 @@ async function openPane($: Engine, patch: Partial<CrewView>, w?: CrewWorker) {
   await $.ui.open({ id: PANE, title: TITLE, focus: true, closeOnEscape: true })
 }
 
-async function act($: Engine, request: Record<string, unknown>, what: string): Promise<boolean> {
+async function act($: Engine, request: CrewRequest, what: string): Promise<boolean> {
   if (!bridgeKey) {
     $.ui.toast('pi-crew: the bridge is not running')
     return false
@@ -264,9 +262,11 @@ export const register: Register = on => {
 
   on('tool.call', async ($, e, next) => {
     const op = e.tool.startsWith(`mcp__${PLUGIN}__`) ? e.tool.slice(`mcp__${PLUGIN}__`.length) : undefined
-    if (!op || !OPS[op]) return next(e)
+    if (!op || !Object.hasOwn(OPS, op)) return next(e)
     if (!bridgeKey) return { deny: 'pi-crew runs only in an interactive session' }
-    const answer = await call($, OPS[op](e as unknown as Record<string, unknown>)).catch((error: unknown) => ({
+    // `op` names an entry of OPS and the engine has checked `e` against that tool's schema; TS cannot correlate the two.
+    const build = OPS[op as ToolOp] as (input: unknown) => CrewRequest
+    const answer = await call($, build(e)).catch((error: unknown) => ({
       raw: JSON.stringify({ ok: false, error: String(error) }),
     }))
     return { result: answer.raw }
