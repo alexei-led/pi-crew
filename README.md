@@ -156,7 +156,7 @@ Long worker names are clipped in narrow lists; detail actions stay on separate l
 - The worker's launcher starts it in `cwd`, and its brief tells it to stay there. Pi does not enforce that: a model can still `cd` away, which the DONE checks catch.
 - Idle alerts come from Pi's intercom presence (`idle`, `thinking`, `tool:…`), which also carries context %.
 - The bridge loads the client from Pi's own pi-intercom install, so the wire protocol matches the running broker. Nothing is vendored.
-- State lives in `~/.pi-crew/<pane>/` (mode 0700): workers, a short message log, unanswered reports, briefs.
+- State lives in `~/.pi-crew/<pane>/` (mode 0700): workers, a short message log, unanswered reports, briefs. A state file the bridge cannot read is renamed to `<name>.bad-<timestamp>` and reported as an error, never overwritten.
 
 Cleanup is automatic. The pane is for current work, not history:
 
