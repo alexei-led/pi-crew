@@ -197,12 +197,17 @@ test("bridge round trip: start broker, spawn, both directions, replay until ack,
     assert.deepEqual(bridge.events.filter(e => e.type === "message").map(e => e.id).filter(id => id === reportId), []);
   });
 
-  await t.test("a report sent while the bridge is down is queued and delivered on restart", async () => {
+  await t.test("a report sent while the bridge is down comes once, after ready and the older unacked ones", async () => {
     await bridge!.stop();
     const sent = await worker.client.send(leadId, { text: "while you were out" });
     assert.equal(sent.delivered, true);
     bridge = new Bridge();
     await bridge.next(e => e.type === "message" && e.text === "while you were out");
+    await new Promise(r => setTimeout(r, 300));
+    const kinds = bridge.events.filter(e => e.type === "ready" || e.type === "message").map(e => (e.type === "ready" ? "ready" : e.text));
+    assert.equal(kinds[0], "ready");
+    assert.deepEqual(kinds.filter(k => k === "while you were out"), ["while you were out"], "announced once");
+    for (const older of ["still checking", "progress"]) assert.ok(kinds.indexOf(older) > 0 && kinds.indexOf(older) < kinds.indexOf("while you were out"), older);
   });
 
   await t.test("an intercom ask is answered with replyTo after a bridge restart, and as a plain message once the worker gave up", async () => {

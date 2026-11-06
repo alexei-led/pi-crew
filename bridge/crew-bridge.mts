@@ -182,7 +182,9 @@ async function serve(key: string, leadName: string) {
 
   // A message reaches the lead in arrival order, after a DONE's git checks. It is stored and receipted first, so a
   // slow check never runs into the broker's receipt timeout, and a restart replays it with the checks redone.
-  let announcing: Promise<void> = Promise.resolve();
+  // Held until `ready` is out, so the mod knows the crew before the first report.
+  let start!: () => void;
+  let announcing = new Promise<void>(resolve => (start = resolve));
   const announce = (event: Inbound) => {
     announcing = announcing
       .then(async () => {
@@ -251,6 +253,8 @@ async function serve(key: string, leadName: string) {
   });
   client.on("error", (error: unknown) => emit({ type: "error", error: String(error) }));
 
+  // Unacked reports from an earlier run go first; the broker flushes what queued meanwhile at registration.
+  for (const pending of inbox.values()) announce(pending);
   const cfg = loadConfig();
   await spawnBrokerIfNeeded(cfg.brokerCommand, cfg.brokerArgs);
   await client.connect(
@@ -536,7 +540,7 @@ async function serve(key: string, leadName: string) {
     type: "ready", lead, agtermSession: process.env.AGTERM_SESSION_ID ?? null,
     workers: [...workers.values()], feed: readLines<Msg>(feedFile, FEED_REPLAY),
   });
-  for (const pending of inbox.values()) announce(pending);
+  start();
   publishRoster();
 }
 
