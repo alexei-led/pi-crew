@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { createCrew, type CrewDeps, type Incoming, type Peer } from "../bridge/crew.mts";
+import { createCrew, type Crew, type CrewDeps, type Incoming, type Peer } from "../bridge/crew.mts";
 import { stableId, type Git, type SessionInfo } from "../bridge/lib.mts";
 import type { BridgeEvent } from "../types/index.d.ts";
 
@@ -15,7 +15,7 @@ const NO_SESSION = Object.assign(new Error("exit 1"), { stdout: '{"ok":false,"er
 
 type Setup = {
   dir: string;
-  crew: ReturnType<typeof createCrew>;
+  crew: Crew;
   events: BridgeEvent[];
   agtermCalls: string[][];
   sent: Array<{ to: string; text: string; replyTo?: string }>;

@@ -1,5 +1,6 @@
-// The crew: workers, the lead's inbox, open asks and the feed, and the handlers that change them. Everything outside
-// the process is injected (see CrewDeps), so a test drives it with fakes. Importing this file has no side effects.
+// The crew: workers, the lead's inbox, open asks and the feed, and the handlers that change them. The broker client,
+// agtermctl, git, the clock and the event sink are injected (see CrewDeps), so a test drives it with fakes; state lives on
+// disk under `dir`, and the roster and exit-check delays use real timers. Importing this file has no side effects.
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 
@@ -505,7 +506,6 @@ export function createCrew(dir: string, deps: CrewDeps) {
     checkIdle,
     checkExited,
     prune: pruneNow,
-    publishRoster,
     /** Tells the mod the crew, then lets held reports through. Call once, after connecting. */
     ready() {
       emit({
