@@ -189,12 +189,21 @@ test("unread counts what the lead does not have yet: an ack lowers it, never bel
   assert.equal(unread(), 1, "p3 arrived after the user read the thread and still waits");
   s.clock.at += 5 * 60_000;
   await s.crew.checkIdle();
-  const alert = json(s.dir, "inbox.json").find((m: any) => m.kind === "idle");
-  await s.crew.handle({ op: "ack", id: alert.id });
-  assert.equal(unread(), 1, "the quiet alert was never counted");
+  assert.ok(json(s.dir, "inbox.json").some((m: any) => m.kind === "idle"), "the quiet alert waits in the inbox");
   await s.crew.handle({ op: "ack", id: "p3" });
-  assert.equal(unread(), 0);
+  assert.equal(unread(), 0, "the quiet alert still waits and was never counted");
   assert.equal(json(s.dir, "workers.json")[0].unread, 0);
+});
+
+test("a record written before 0.5 that counts messages the lead already has is corrected at load", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-crew-unit-"));
+  const record = { name: "api", id: API_ID, cwd: "/w", model: "m", n: 1, state: "work", startedAt: 0, lastAt: 0 };
+  writeFileSync(join(dir, "workers.json"), JSON.stringify([{ ...record, unread: 3 }, { ...record, name: "web", id: "web-id", n: 2, unread: 2 }]));
+  const waits = (id: string) => ({ type: "message", from: { id: "web-id", cwd: "/w", worker: "web" }, id, expectsReply: false, kind: "report", text: "step" });
+  writeFileSync(join(dir, "inbox.json"), JSON.stringify([waits("p1"), waits("p2")]));
+  const s = setup({ dir });
+  s.crew.ready();
+  assert.deepEqual(eventsOf(s, "ready")[0]!.workers.map(w => [w.name, w.unread]), [["api", 0], ["web", 2]]);
 });
 
 test("a worker spawned without a task stays idle after its ready and raises no quiet alert", async () => {

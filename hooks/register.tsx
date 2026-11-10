@@ -99,9 +99,12 @@ export const register: Register = on => {
     return { result: answer.raw }
   })
 
-  // The user's own prompt, typed here or sent over Remote Control; a slash command carries nothing.
-  on('prompt.submit', ($, e, next) =>
-    connected() && (e.origin.kind === 'composer' || e.origin.kind === 'bridge') && e.command === undefined ? withProgress($, e, next) : next(e))
+  // The user's own prompt, typed here or sent over Remote Control, carries the progress that waited. Not a slash
+  // command, and not a prompt queued behind a running turn: the user may still take that one back, and its context with it.
+  on('prompt.submit', ($, e, next) => {
+    const own = e.origin.kind === 'composer' || e.origin.kind === 'bridge'
+    return connected() && own && e.command === undefined && e.turnId === undefined ? withProgress($, e, next) : next(e)
+  })
 
   on('command.run', { command: 'crew' }, async $ => {
     await setView($, {})

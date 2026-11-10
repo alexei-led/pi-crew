@@ -116,6 +116,10 @@ export function createCrew(dir: string, deps: CrewDeps) {
         isRecord(raw) && Object.values(raw).every(at => typeof at === "number") ? (raw as Record<string, number>) : undefined),
     ).filter(([, at]) => now() - at < ASK_KEEP_MS),
   );
+  /** A worker's messages the lead does not have yet. The quiet alert is the bridge's own and never counted as unread. */
+  const waitingFrom = (name: string) => [...inbox.values()].filter(m => m.from.worker === name && m.kind !== "idle").length;
+  // Unread never exceeds what waits: records written before 0.5 kept counting messages the lead already had.
+  for (const w of workers.values()) if (w.unread > waitingFrom(w.name)) workers.set(w.name, { ...w, unread: waitingFrom(w.name) });
   const feedIds = new Set(readLines<Msg>(feedFile).map(m => m.id));
   /** Presence of every broker session by id: Pi's status, since when, context use. */
   const liveSessions = new Map<string, Live>();
@@ -368,10 +372,8 @@ export function createCrew(dir: string, deps: CrewDeps) {
     const from = inbox.get(req.id)?.from.worker;
     if (inbox.delete(req.id)) saveInbox();
     const w = from ? workers.get(from) : undefined;
-    // The quiet alert is the bridge's own: it never counted as unread.
-    const waiting = [...inbox.values()].filter(m => m.from.worker === from && m.kind !== "idle").length;
-    if (w && w.unread > waiting) {
-      workers.set(w.name, { ...w, unread: waiting });
+    if (w && w.unread > waitingFrom(w.name)) {
+      workers.set(w.name, { ...w, unread: waitingFrom(w.name) });
       saveWorkers();
     }
     return { acked: req.id };

@@ -34,10 +34,11 @@ test("workerBrief names the lead id and carries the task", () => {
   assert.match(brief, /if you changed files, commit first/);
   assert.match(brief, /changes nothing reports the current HEAD/);
   assert.match(brief, /Report the checks you actually ran and their rc; use `tests: none` only if you ran none/);
-  assert.match(brief, /After a Q:, DONE: or blocker send, stop and wait/);
+  assert.match(brief, /After a Q: or DONE: send, stop and wait/);
+  assert.match(brief, /"Q: " when the lead must decide something or you are blocked/);
   assert.match(brief, /After a progress report, keep working/);
   assert.match(brief, /Progress reports are allowed/);
-  assert.match(brief, /a progress report: it does not wake the lead, who reads it later\. Never put a question in one\./);
+  assert.match(brief, /a progress report: it does not wake the lead, who reads it later\. Never put a question or a blocker in one\./);
   assert.match(brief, /First task:\ndo the thing$/);
   assert.match(brief, /working directory is \/x\. Run every command there/);
   for (const field of ["head", "branch", "tests", "rc", "logs"]) assert.match(brief, new RegExp(`^ +${field}: <`, "m"), field);

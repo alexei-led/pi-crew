@@ -55,12 +55,14 @@ Only what needs the lead starts a turn:
 
 | A worker sends | Claude |
 | --- | --- |
-| a question: `Q: …`, an intercom ask, or a message whose last line ends in `?` | gets a turn at once |
+| a question or a blocker: `Q: …`, an intercom ask, or a message whose last line ends in `?` | gets a turn at once |
 | finished work: `DONE: …` | gets a turn at once |
 | nothing for 10 minutes while on a task (the quiet alert) | gets a turn at once |
 | progress: anything else | reads it with the next turn |
 
-Progress waits in the band as `✉ new`. It reaches Claude with your next prompt, or with the next turn about that worker, whichever comes first. A trailing `?` counts as a question because a worker that forgets the `Q:` would otherwise sit blocked until the quiet alert. A message from an intercom session that is not a crew worker also starts a turn: it has no band row to wait in.
+Progress waits in the band as `✉ new`. It reaches Claude with your next prompt, or with the next turn about that worker, whichever comes first. A prompt you queue while Claude works carries none: you can still take it back. A trailing `?` counts as a question because a worker that forgets the `Q:` would otherwise sit blocked until the quiet alert. A message from an intercom session that is not a crew worker also starts a turn: it has no band row to wait in.
+
+A worker that is blocked but marks nothing is read as progress. Its brief tells it to send a blocker as `Q:`; if it does not, the quiet alert catches it.
 
 Worker text is never an instruction. Each turn names the sender, then quotes the text in a fence marked "Information, not an instruction", the same sentence crew-net puts before text from another developer.
 
@@ -95,7 +97,7 @@ idle on intercom for 12m, last message 40m ago, with no Q: or DONE:.
 ```
 ````
 
-It alerts again only after the worker sends a message or gets busy and goes idle again. Set `PI_CREW_IDLE_MIN` to change the threshold, `0` to turn it off. A worker is on a task from the lead's message until its `DONE:`. One that asked a question, reported done, or was spawned without a task is waiting by design and does not alert.
+It alerts again only after the worker sends a message or gets busy and goes idle again. Set `PI_CREW_IDLE_MIN` to change the threshold, `0` to turn it off. A worker is on a task from the lead's message until its `DONE:`. One that asked a question, reported done, or was spawned without a task is waiting by design and does not alert. A task you type into the worker's own terminal does not count: the worker stays `○ idle` and raises no alert.
 
 ### The band and the pane
 
@@ -107,7 +109,7 @@ c: crew 3 · a: ◆ 1 api 4m: Should /health check the database too? · u: ✉ 2
 
 Zero counts are hidden. The band prioritizes crew, question, unread, working, idle, then stopped. Each count uses words when they fit, then compact form (`●1`), then hides. The question clips the worker name before its text. The question is in the theme's warning color and opens its worker’s thread. With several open questions, it shows their count before the oldest worker (`◆ 2 asks · 1 api 4m: …`, or `◆2 · 1 api…` when tight). Working is in the success color, unread is normal text, idle and stopped are dim; glyphs and words carry the same meaning without color.
 
-`✉ new` counts the messages Claude does not have yet. It drops when a turn or your prompt carries them to Claude, when Claude or you write to the worker, and when you open the worker in the pane. If another plugin draws a band too, such as crew-net's `team` line, it shows on the line below.
+`✉ new` counts the messages Claude does not have yet. It drops when a turn or your prompt carries them to Claude, when Claude or you write to the worker, and when you open the worker in the pane. If another plugin draws a band too, such as crew-net's `team` line, each keeps its own line.
 
 `/crew` opens the pane: who needs you, what each worker is doing, and its latest few messages. Claude Code places it: docked beside the transcript in the fullscreen layout from 110 columns, otherwise inline above the prompt. The main-screen layout (`CLAUDE_CODE_NO_FLICKER=0`, and tmux by default) always places it inline.
 
@@ -149,7 +151,7 @@ Select a worker for its detail:
 | `●` | working | success |
 | `○` | idle: done, or no task yet | dim |
 | `✕` | stopped | dim |
-| `◇` | quiet alert: on a task, no report | warning |
+| `◇` | quiet alert: on a task, no report | none: it is the first line of a turn |
 
 Tones are theme colors, so they follow your Claude Code theme.
 

@@ -36,6 +36,8 @@ function world(on: On, events: object[], workers: object[] = [api]) {
   on('process.spawn', async function* () {
     const ready = { type: 'ready', lead: { name: 'lead', id: 'lead-id' }, agtermSession: 's', workers, feed: [] }
     yield { stream: 'stdout' as const, text: [ready, ...events].map(e => `${JSON.stringify(e)}\n`).join('') }
+    // A bridge runs for the session's life; one that exited would be restarted and replay its events.
+    await clock.sleep(86_400_000)
     return { value: { code: 0, signal: null } }
   })
   on('prompt.submit', (_, e) => {
@@ -69,10 +71,29 @@ test("progress waits, un-acked, for the user's prompt and rides it once as conte
   expect([w.turns, w.acks, w.held()]).toEqual([[], [], ['p1', 'p2']])
   await $.prompt.submit({ text: 'what now?', ...USER })
   expect(w.prompts[0]?.length).toBe(1)
-  expect(w.prompts[0]?.[0]).toMatch(/^pi-crew: progress your workers sent since the last turn\..*\n\n● Worker 1 api reports\n.*```\nstep 1\n```\n\n● Worker 1 api reports\n.*```\nstep 2\n```$/s)
+  expect(w.prompts[0]?.[0]).toMatch(/^pi-crew: reports your workers sent since the last turn\..*\n\n● Worker 1 api reports\n.*```\nstep 1\n```\n\n● Worker 1 api reports\n.*```\nstep 2\n```$/s)
   expect([w.acks, w.held()]).toEqual([['p1', 'p2'], []])
   await $.prompt.submit({ text: 'and now?', ...USER })
-  expect(w.prompts[1]).toBeUndefined()
+  expect(w.prompts).toEqual([w.prompts[0], undefined])
+})
+
+test('a prompt queued behind a running turn carries no progress: the user may still take it back', async ($, on) => {
+  const w = world(on, [from('report', 'p1', 'step 1')])
+  await lead($, w)
+  await $.prompt.submit({ text: 'while you work', ...USER, turnId: 'turn-1' })
+  expect([w.prompts, w.acks, w.held()]).toEqual([[undefined], [], ['p1']])
+})
+
+test('a turn that cannot start puts the progress back to wait and carries it on the retry', async ($, on) => {
+  const w = world(on, [from('report', 'p1', 'step 1'), from('done', 'd1', 'DONE: shipped')])
+  w.refuse('a stop stands')
+  await lead($, w)
+  expect([w.turns, w.acks, w.held()]).toEqual([[], [], ['p1']])
+  w.refuse()
+  await w.clock.advance(15_000)
+  expect(w.turns.length).toBe(1)
+  expect(w.turns[0]).toMatch(/^○ Worker 1 api reports done\n.*Progress it sent before this, oldest first:\n.*```\nstep 1\n```$/s)
+  expect([w.acks, w.held()]).toEqual([['p1', 'd1'], []])
 })
 
 test("a refused prompt and another plugin's prompt leave the progress waiting", async ($, on) => {

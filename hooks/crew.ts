@@ -66,8 +66,11 @@ export async function connect($: Engine) {
 
 /** The lead has these reports: a replay skips them and the bridge stops counting them as new. */
 async function taken($: Engine, events: CrewInbound[]) {
-  await update($, seen, ids => [...ids, ...events.map(ev => ev.id)].slice(-SEEN_LIMIT))
-  for (const ev of events) await call($, { op: 'ack', id: ev.id })
+  const ids = new Set(events.map(ev => ev.id))
+  await update($, seen, list => [...list, ...ids].slice(-SEEN_LIMIT))
+  // A bridge restart may have replayed one into the wait while its turn was entering.
+  await update($, held, list => list.filter(ev => !ids.has(ev.id)))
+  for (const id of ids) await call($, { op: 'ack', id })
 }
 
 /** Takes what `pick` matches out of the waiting progress, so a turn and a prompt never both carry one report. */
@@ -82,7 +85,7 @@ async function claim($: Engine, pick: (ev: CrewInbound) => boolean): Promise<Cre
 
 /** Puts claimed progress back to wait, ahead of what arrived since. */
 function restore($: Engine, events: CrewInbound[]) {
-  return update($, held, list => [...events, ...list])
+  return update($, held, list => [...events, ...list.filter(ev => !events.some(back => back.id === ev.id))])
 }
 
 /** A worker's progress waits here, un-acked, so a bridge restart replays it; the band counts it as new. */
@@ -111,14 +114,18 @@ async function deliver($: Engine, ev: CrewInbound) {
   for (let n = 0; n < SUBMIT_ATTEMPTS; n++) {
     // The turn about a worker carries the progress it sent while the lead was not looking.
     const earlier = name ? await claim($, m => m.from.worker === name) : []
-    const result = await $.prompt.submit({ text: turnText(worker, ev, name ? panelNotes.get(name) : undefined, earlier) })
-    if (!result.drop) {
+    let drop: string | undefined = 'failed'
+    try {
+      drop = (await $.prompt.submit({ text: turnText(worker, ev, name ? panelNotes.get(name) : undefined, earlier) })).drop
+    } finally {
+      if (drop) await restore($, earlier)
+    }
+    if (!drop) {
       if (name) panelNotes.delete(name)
       await taken($, [...earlier, ev])
       return
     }
-    await restore($, earlier)
-    $.ui.log(`pi-crew: report ${ev.id} from ${peer} not submitted (${result.drop}); retrying`, { to: 'debug' })
+    $.ui.log(`pi-crew: report ${ev.id} from ${peer} not submitted (${drop}); retrying`, { to: 'debug' })
     await $.clock.sleep(SUBMIT_RETRY_MS)
   }
   // Left un-acked in the bridge inbox: the next bridge start replays it.
@@ -131,10 +138,10 @@ export async function withProgress(
 ): Promise<PromptSubmitResult> {
   const waiting = await claim($, () => true)
   if (waiting.length === 0) return next(e)
-  const ws = await read($, workers)
-  const reports = waiting.map(ev => turnText(ws.find(w => w.name === ev.from.worker), ev))
   let entered = false
   try {
+    const ws = await read($, workers)
+    const reports = waiting.map(ev => turnText(ws.find(w => w.name === ev.from.worker), ev))
     const result = await next({ ...e, context: [...(e.context ?? []), progressText(reports)] })
     entered = result.drop === undefined
     return result

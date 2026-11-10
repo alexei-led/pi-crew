@@ -11,7 +11,7 @@ export const registerBand = (on: On) =>
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const { workers: ws, now } = await readCrew($)
     if (e.props.hasSurvey || ws.length === 0) return next(e)
-    // Another plugin's band (crew-net's team line) draws under this one: both call next and stack.
+    // Another plugin's band (crew-net's team line) keeps its own line: both renderers call next and stack.
     const below = await next(e)
     const { Box, Button, Text } = $.ui.resolve(e)
     const q = nextQuestion(ws)
