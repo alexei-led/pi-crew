@@ -172,6 +172,50 @@ test("a message seen twice is stored once but receipted both times; ack drops it
   assert.deepEqual(json(s.dir, "inbox.json"), []);
 });
 
+test("unread counts what the lead does not have yet: an ack lowers it, never below what still waits", async () => {
+  const s = setup({ deps: { idleMs: 60_000 } });
+  await s.crew.handle({ op: "spawn", name: "api", cwd: "/w", task: "t" });
+  const unread = () => lastWorkers(s)[0]!.unread;
+  s.crew.onMessage(peer(API_ID), incoming("p1", "step 1"));
+  s.crew.onMessage(peer(API_ID), incoming("p2", "step 2"));
+  assert.equal(unread(), 2);
+  await s.crew.handle({ op: "ack", id: "p1" });
+  assert.equal(unread(), 1, "the lead has p1");
+  await s.crew.handle({ op: "ack", id: "p1" });
+  assert.equal(unread(), 1, "an ack twice changes nothing");
+  await s.crew.handle({ op: "read", name: "api" });
+  s.crew.onMessage(peer(API_ID), incoming("p3", "step 3"));
+  await s.crew.handle({ op: "ack", id: "p2" });
+  assert.equal(unread(), 1, "p3 arrived after the user read the thread and still waits");
+  s.clock.at += 5 * 60_000;
+  await s.crew.checkIdle();
+  assert.ok(json(s.dir, "inbox.json").some((m: any) => m.kind === "idle"), "the quiet alert waits in the inbox");
+  await s.crew.handle({ op: "ack", id: "p3" });
+  assert.equal(unread(), 0, "the quiet alert still waits and was never counted");
+  assert.equal(json(s.dir, "workers.json")[0].unread, 0);
+});
+
+test("a record written before 0.5 that counts messages the lead already has is corrected at load", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-crew-unit-"));
+  const record = { name: "api", id: API_ID, cwd: "/w", model: "m", n: 1, state: "work", startedAt: 0, lastAt: 0 };
+  writeFileSync(join(dir, "workers.json"), JSON.stringify([{ ...record, unread: 3 }, { ...record, name: "web", id: "web-id", n: 2, unread: 2 }]));
+  const waits = (id: string) => ({ type: "message", from: { id: "web-id", cwd: "/w", worker: "web" }, id, expectsReply: false, kind: "report", text: "step" });
+  writeFileSync(join(dir, "inbox.json"), JSON.stringify([waits("p1"), waits("p2")]));
+  const s = setup({ dir });
+  s.crew.ready();
+  assert.deepEqual(eventsOf(s, "ready")[0]!.workers.map(w => [w.name, w.unread]), [["api", 0], ["web", 2]]);
+});
+
+test("a worker spawned without a task stays idle after its ready and raises no quiet alert", async () => {
+  const s = setup({ deps: { idleMs: 60_000 } });
+  await s.crew.handle({ op: "spawn", name: "api", cwd: "/w" });
+  s.crew.onMessage(peer(API_ID), incoming("r1", "ready"));
+  assert.equal(lastWorkers(s)[0]!.state, "idle");
+  s.clock.at += 60 * 60_000;
+  await s.crew.checkIdle();
+  assert.equal(json(s.dir, "inbox.json").some((m: any) => m.kind === "idle"), false);
+});
+
 test("reports are held until ready, then arrive in order; a DONE carries the git checks and is stored with them", async () => {
   const s = setup();
   await s.crew.handle({ op: "spawn", name: "api", cwd: "/w" });

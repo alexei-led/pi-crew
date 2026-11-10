@@ -347,6 +347,8 @@ test("lead feedback: default-branch guard, DONE checks, idle alerts, send by ses
   });
 
   await t.test("a working worker idle on intercom alerts the lead once per idle stretch, with its screen", async () => {
+    // Its DONE left it idle; only a task from the lead puts it back to work.
+    assert.equal((await call({ op: "send", to: "slim", text: "one more thing" }, key, e2)).code, 0);
     slim.client.updatePresence({ status: "idle" });
     const alert = await b.next(e => e.type === "message" && e.kind === "idle" && e.from.worker === "slim", 5_000);
     assert.match(alert.text, /^idle on intercom for \d+m, last message \d+m ago, with no Q: or DONE:\./);

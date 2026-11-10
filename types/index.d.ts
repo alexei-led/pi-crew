@@ -97,10 +97,12 @@ declare module 'claude-code' {
       workers: Shaped<CrewWorker[]>
       feed: Shaped<CrewMsg[]>
       view: Shaped<CrewView>
-      /** Minutes since the epoch, bumped while workers run so ages redraw. */
+      /** A counter bumped each minute while workers are listed, so ages redraw. */
       tick: Shaped<number>
-      /** Ids of worker messages already submitted as turns: a replay after a reload is skipped. */
+      /** Ids of worker messages the lead already has: a replay after a reload is skipped. */
       seen: Shaped<string[]>
+      /** Progress reports waiting for the next turn. */
+      held: Shaped<CrewInbound[]>
     }
   }
 }

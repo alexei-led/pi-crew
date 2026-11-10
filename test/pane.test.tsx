@@ -2,7 +2,7 @@ import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 
 const props = {
-  title: 'Pi crew',
+  title: 'crew',
   isFocused: true,
   bodyColumns: 90,
   placement: 'dock',
@@ -55,6 +55,19 @@ test('the band stays hidden with no workers', async ($, on) => {
   })
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await ui.find({ type: 'Button', key: 'crew' })).toBeFalsy()
+  await ui.unmount()
+})
+
+test('the band draws its line above what the next band renderer returns', async ($, on) => {
+  seed(on, { workers: { shape: 'workers-1', value: WORKERS } })
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>team · ✉ 2 new</Text>
+  })
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Button', key: 'crew' })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: 'team · ✉ 2 new' })).toBeTruthy()
+  expect((await ui.find({ type: 'Box' }))?.text).toMatch(/^crew 2.*team · ✉ 2 new$/s)
   await ui.unmount()
 })
 
@@ -113,12 +126,12 @@ for (const sel of [undefined, 'api', 'missing']) {
   }
 }
 
-test('word filters use a n w i s', async ($, on) => {
+test('word filters use a h w i s', async ($, on) => {
   const values = { workers: { shape: 'workers-1', value: [...WORKERS, worker('quiet', 4, { state: 'idle' })] } }
   seed(on, values)
   for (const [filter, key, label, names] of [
     ['all', 'a', 'all 4', ['w-api', 'w-web', 'w-quiet', 'w-old']],
-    ['ask', 'n', '◆ needs you 1', ['w-api']],
+    ['ask', 'h', '◆ needs you 1', ['w-api']],
     ['work', 'w', '● working 1', ['w-web']],
     ['idle', 'i', '○ idle 1', ['w-quiet']],
     ['gone', 's', '✕ stopped 1', ['w-old']],
@@ -135,6 +148,30 @@ test('word filters use a n w i s', async ($, on) => {
     expect(rows[0]?.props.autoFocus).toBe(true)
     await ui.unmount()
   }
+})
+
+test('a digit opens the worker with that number; m and g switch tabs; no list key is a shared answer key', async ($, on) => {
+  const values: Record<string, { shape: string; value: unknown }> = {
+    workers: { shape: 'workers-1', value: [...WORKERS, worker('late', 12)] },
+  }
+  seed(on, values)
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const hotkeys = async (prefix: string) =>
+    (await ui.findAll({ type: 'Button' })).filter(b => String(b.key).startsWith(prefix)).map(b => [b.key, b.props.hotkey])
+  expect(await hotkeys('w-')).toEqual([['w-api', '1'], ['w-web', '2'], ['w-late', undefined], ['w-old', '3']])
+  expect(await hotkeys('tab-')).toEqual([['tab-inbox', 'm'], ['tab-crew', 'g']])
+  const used = (await ui.findAll({ type: 'Button' })).map(b => b.props.hotkey)
+  for (const shared of ['n', 'y', 'r', 'b', 'o', 'e', 'c', 'v']) expect(used.includes(shared)).toBe(false)
+  expect((await ui.find({ type: 'Button', key: 'w-web' }))?.text).toMatch(/^● web /)
+  expect((await ui.find({ type: 'Button', key: 'w-late' }))?.text).toMatch(/^   ● 12 late /)
+  await ui.press({ key: 'w-web' })
+  expect((values.view?.value as { sel?: string }).sel).toBe('web')
+  await ui.unmount()
+  values.view = { shape: 'view-3', value: { tab: 'inbox', filter: 'all', showAll: false, questionExpanded: false, collapsed: [] } }
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'tab-crew' })
+  expect((values.view.value as { tab: string }).tab).toBe('crew')
+  await ui.unmount()
 })
 
 for (const state of ['work', 'gone']) {
@@ -201,8 +238,9 @@ test('40 columns clips long worker tags before the age and preview', async ($, o
   seed(on, { workers: { shape: 'workers-1', value: [worker(name, 1)] } })
   const ui = await $.ui.mount({ ...PANE, props: { ...props, bodyColumns: 40, placement: 'inline' }, surface: 'terminal' })
   const row = await ui.find({ key: `w-${name}` })
-  expect(row?.text).toMatch(/^● 1 a+…/)
-  expect((row?.text ?? '').length <= 40).toBe(true)
+  expect(row?.props.hotkey).toBe('1')
+  expect(row?.text).toMatch(/^● a+…/)
+  expect((row?.text ?? '').length <= 40 - 3).toBe(true)
   await ui.unmount()
 })
 
@@ -301,19 +339,21 @@ test('the band counts open questions and answers the oldest in ask color', async
   on('ui.open', () => ({ value: { isPlaced: true } }))
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect((await ui.find({ type: 'Button', key: 'next' }))?.text).toBe('◆ 2 asks · 1 api 1m: Use Postgres?')
-  expect((await ui.find({ type: 'Text', text: /^◆ 2 asks · 1 api/ }))?.props.color).toBe('yellow')
+  expect((await ui.find({ type: 'Text', text: /^◆ 2 asks · 1 api/ }))?.props.color).toBe('warning')
   expect((await ui.find({ type: 'Button', key: 'next' }))?.props.hotkey).toBe('a')
   await ui.press({ key: 'next' })
   expect(values.view?.value).toMatchObject({ tab: 'inbox', filter: 'ask', sel: 'api' })
   await ui.unmount()
 })
 
-test('band state colors reinforce the glyphs and words', async ($, on) => {
-  seed(on, { workers: { shape: 'workers-1', value: WORKERS } })
+test('band tones are the theme keys of the screen contract: warning, success, normal, dim', async ($, on) => {
+  seed(on, { workers: { shape: 'workers-1', value: [...WORKERS, worker('quiet', 4, { state: 'idle' })] } })
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect((await ui.find({ type: 'Text', text: /^◆ 1 api/ }))?.props.color).toBe('yellow')
-  expect((await ui.find({ type: 'Text', text: /^● 1 working$/ }))?.props.color).toBe('green')
-  expect((await ui.find({ type: 'Text', text: /^✉ 1 new$/ }))?.props.color).toBe('cyan')
+  expect((await ui.find({ type: 'Text', text: /^◆ 1 api/ }))?.props.color).toBe('warning')
+  expect((await ui.find({ type: 'Text', text: /^● 1 working$/ }))?.props.color).toBe('success')
+  const unread = await ui.find({ type: 'Text', text: /^✉ 1 new$/ })
+  expect([unread?.props.color, unread?.props.dimColor]).toEqual([undefined, undefined])
+  expect((await ui.find({ type: 'Text', text: /^○ 1 idle$/ }))?.props.dimColor).toBe(true)
   expect((await ui.find({ type: 'Text', text: /^✕ 1 stopped$/ }))?.props.dimColor).toBe(true)
   await ui.unmount()
 })
@@ -352,7 +392,7 @@ test('a grouped 24-column worker row clips its tag and drops preview before age'
   const ui = await $.ui.mount({ ...PANE, props: { ...props, bodyColumns: 24, placement: 'inline' }, surface: 'terminal' })
   const row = await ui.find({ type: 'Button', key: `w-${name}` })
   expect((row?.text ?? '').length <= 24).toBe(true)
-  expect(row?.text).toMatch(/^  ● 12 a+…/)
+  expect(row?.text).toMatch(/^   ● 12 a+…/)
   expect(row?.text).toMatch(/1m.*✉99/)
   expect(row?.text.includes('preview')).toBe(false)
   await ui.unmount()

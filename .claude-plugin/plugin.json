@@ -1,7 +1,7 @@
 {
   "name": "pi-crew",
-  "version": "0.4.1",
-  "description": "Lead a crew of Pi workers in agterm over pi-intercom: spawn, message, and get woken by their reports.",
+  "version": "0.5.0",
+  "description": "Lead a crew of Pi workers in agterm over pi-intercom: spawn, message, and get woken by their questions and finished work.",
   "types": "./types/index.d.ts",
   "author": {
     "name": "Alexei Ledenev"
