@@ -37,6 +37,7 @@ test("workerBrief names the lead id and carries the task", () => {
   assert.match(brief, /After a Q:, DONE: or blocker send, stop and wait/);
   assert.match(brief, /After a progress report, keep working/);
   assert.match(brief, /Progress reports are allowed/);
+  assert.match(brief, /a progress report: it does not wake the lead, who reads it later\. Never put a question in one\./);
   assert.match(brief, /First task:\ndo the thing$/);
   assert.match(brief, /working directory is \/x\. Run every command there/);
   for (const field of ["head", "branch", "tests", "rc", "logs"]) assert.match(brief, new RegExp(`^ +${field}: <`, "m"), field);
@@ -54,14 +55,14 @@ test("launchScript passes hostile values through the shell unchanged", () => {
   const cwd = join(dir, `it's $(touch pwned) "q" \`x\``);
   execFileSync("mkdir", ["-p", cwd]);
   const fake = join(dir, "fake-pi");
-  writeFileSync(fake, '#!/bin/sh\nprintf "%s\\n" "$PWD" "$PI_INTERCOM_STABLE_ID" "$@"\n');
+  writeFileSync(fake, '#!/bin/sh\nprintf "%s\\n" "$PWD" "$PI_INTERCOM_STABLE_ID" "$CREW_NET_ROLE" "$@"\n');
   chmodSync(fake, 0o755);
   const worker = { name: "api", id: "id-1", cwd, model: "router/x; echo boom" };
   const brief = join(dir, "brief $x.md");
   const script = join(dir, "launch.sh");
   writeFileSync(script, launchScript(worker, brief, { PATH: process.env.PATH, PI_CREW_PI_COMMAND: fake }));
   const out = execFileSync("sh", [script], { encoding: "utf8", cwd: dir }).trim().split("\n");
-  assert.deepEqual(out.slice(1), ["id-1", "--model", "router/x; echo boom", "--name", "api", `@${brief}`]);
+  assert.deepEqual(out.slice(1), ["id-1", "worker", "--model", "router/x; echo boom", "--name", "api", `@${brief}`]);
   assert.equal(realpathSync(out[0]!), realpathSync(cwd));
   assert.throws(() => execFileSync("test", ["-e", join(dir, "pwned")]));
 });
@@ -104,6 +105,15 @@ test("worker state: ask opens and stays open until the lead answers; done goes i
   assert.equal(applyIn(gone, msg("ask", "late?")).state, "gone");
   assert.equal(applyOut(gone, msg("out", "x")).state, "gone");
   assert.equal(applyIn(base, msg("report", "x".repeat(1000))).last!.text.length, 300);
+});
+
+test("progress never puts a worker to work: a worker without a task, or one that reported DONE, stays idle", () => {
+  const noTask: Worker = { ...base, state: "idle" };
+  const ready = applyIn(noTask, msg("report", "ready"));
+  assert.deepEqual([ready.state, ready.unread], ["idle", 1]);
+  assert.equal(idleDue({ ...ready, agtermSession: "s1" }, { status: "idle", since: 0 }, 3_600_000, 60_000), false, "no quiet alert for it");
+  assert.equal(applyIn(applyIn(base, msg("done", "finished")), msg("report", "pushed too")).state, "idle");
+  assert.equal(applyOut(ready, msg("out", "first task")).state, "work");
 });
 
 test("upgrade numbers 0.1 records in file order and keeps numbers already set", () => {

@@ -2,7 +2,7 @@ import type { Register } from 'claude-code'
 
 import type { CrewRequest } from '../types'
 import { registerBand } from './band'
-import { PLUGIN, call, connect, connected, setView, showPane, superviseBridge, tickLoop } from './crew'
+import { PLUGIN, call, connect, connected, setView, showPane, superviseBridge, tickLoop, withProgress } from './crew'
 import { registerPane } from './pane'
 
 const TOOLS = [
@@ -10,10 +10,10 @@ const TOOLS = [
     name: 'spawn',
     description:
       'Start a Pi worker (pi-work) in a new agterm session after this one. It registers on pi-intercom with a fixed id, ' +
-      'learns that this session leads it, and reports back with intercom send; each report starts a new turn here. ' +
-      'Workers start a question with "Q:" and a finished task with "DONE:" carrying head, branch, tests, rc and logs, which the ' +
-      'bridge checks against git. Give a first task to start it working at once. With a task, a cwd on the default branch is ' +
-      'refused: give each worker its own worktree.',
+      'learns that this session leads it, and reports back with intercom send. A question ("Q:"), a finished task ("DONE:") ' +
+      'and a worker gone quiet each start a new turn here; progress waits and comes with the next turn. A DONE carries head, ' +
+      'branch, tests, rc and logs, which the bridge checks against git. Give a first task to start it working at once. With a ' +
+      'task, a cwd on the default branch is refused: give each worker its own worktree.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -78,10 +78,11 @@ export const register: Register = on => {
     await connect($)
 
     for (const tool of TOOLS) await $.tool.register({ ...tool, isDeferred: false })
-    await $.command.register({ name: 'crew', description: 'Open the Pi crew pane' })
+    await $.command.register({ name: 'crew', description: 'Open the crew pane: the Pi workers this session leads' })
 
-    void superviseBridge($)
-    void tickLoop($)
+    // Both loops end when the module unloads: the engine aborts the wait they sit in.
+    void superviseBridge($).catch(() => {})
+    void tickLoop($).catch(() => {})
 
     return started
   })
@@ -97,6 +98,10 @@ export const register: Register = on => {
     }))
     return { result: answer.raw }
   })
+
+  // The user's own prompt, typed here or sent over Remote Control; a slash command carries nothing.
+  on('prompt.submit', ($, e, next) =>
+    connected() && (e.origin.kind === 'composer' || e.origin.kind === 'bridge') && e.command === undefined ? withProgress($, e, next) : next(e))
 
   on('command.run', { command: 'crew' }, async $ => {
     await setView($, {})

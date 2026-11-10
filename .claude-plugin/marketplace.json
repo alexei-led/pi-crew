@@ -5,7 +5,7 @@
     {
       "name": "pi-crew",
       "source": "./",
-      "description": "Lead a crew of Pi workers in agterm over pi-intercom: spawn, message, and get woken by their reports."
+      "description": "Lead a crew of Pi workers in agterm over pi-intercom: spawn, message, and get woken by their questions and finished work."
     }
   ]
 }

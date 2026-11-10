@@ -4,12 +4,14 @@ import type { EngineInterface as Engine, On } from 'claude-code'
 import type { CrewFilter, CrewMsg, CrewTab, CrewView, CrewWorker } from '../types'
 import { PANE, act, closePane, openThread, readCrew, reply, setView, toggleGroup } from './crew'
 import {
-  COLOR, GLYPH, LABEL, UNREAD, age, clampText, clip, fold, groups, inboxOrder, matches, oneLine, tag, tally, threadOf,
+  GLYPH, LABEL, TONE, UNREAD, age, clampText, clip, fold, groups, inboxOrder, matches, oneLine, tag, tally, threadOf, toneProps,
 } from './model'
 
 // The transcript keeps every message; the pane shows only each worker's latest few.
 const RECENT = 3
 const RECENT_MORE = 10
+// The engine draws a plain Button's hotkey before its label: "3: ".
+const HOTKEY_CELLS = 3
 
 /**
  * What every part of one pane render reads; built once per render and never mutated. `$` stays a separate argument:
@@ -26,7 +28,7 @@ type Ctx = {
   tagWidth: number
 }
 
-const glyph = ({ ui: { Text } }: Ctx, w: CrewWorker) => <Text color={COLOR[w.state]}>{GLYPH[w.state]}</Text>
+const glyph = ({ ui: { Text } }: Ctx, w: CrewWorker) => <Text {...toneProps(TONE[w.state])}>{GLYPH[w.state]}</Text>
 
 function dismissButton($: Engine, { ui: { Button } }: Ctx) {
   return <Button plain hotkey="x" key="close" role="dismiss" label="×" onPress={() => closePane($)} />
@@ -40,30 +42,38 @@ function backButton($: Engine, { ui: { Button } }: Ctx) {
   return <Button plain hotkey="b" key="back" label="back" onPress={() => setView($, { sel: undefined })} />
 }
 
-/** One worker line, clipped to the pane width: marker, tag, age, unread count, then as much preview as fits. */
-function workerRow($: Engine, c: Ctx, w: CrewWorker, opts: { indent?: string; autoFocus?: boolean } = {}) {
-  const { ui: { Button, Text }, cols, now, tagWidth } = c
+/** A worker's number opens it from the list, as `1`-`9` open an item in crew-net's pane; past 9 there is no key. */
+const rowKey = (w: CrewWorker) => (w.n >= 1 && w.n <= 9 ? String(w.n) : undefined)
+/** The engine draws the key before the row, so the row itself leaves the number out. */
+const rowName = (w: CrewWorker) => (rowKey(w) ? w.name : tag(w))
+
+/** One worker line, clipped to the pane width: its key, marker, name, age, unread count, then as much preview as fits. */
+function workerRow($: Engine, c: Ctx, w: CrewWorker, autoFocus: boolean) {
+  const { ui: { Button, Text }, now, tagWidth } = c
+  const hotkey = rowKey(w)
+  // A row without a key keeps the key's cells blank, so the markers line up.
+  const gutter = hotkey ? '' : ' '.repeat(HOTKEY_CELLS)
+  const cols = Math.max(0, c.cols - HOTKEY_CELLS)
   const preview = oneLine(w.state === 'ask' && w.ask ? w.ask.text : (w.last?.text ?? LABEL[w.state]))
-  const indent = clip(opts.indent ?? '', Math.max(0, cols - 2))
-  const prefix = clip(`${indent}${GLYPH[w.state]} `, cols)
+  const prefix = clip(`${GLYPH[w.state]} `, cols)
   const unread = w.unread ? clip(` ${UNREAD}${Math.min(w.unread, 99)}`, Math.max(0, cols - prefix.length)) : ''
   const nameWidth = Math.min(tagWidth, Math.max(0, cols - prefix.length - unread.length))
-  const name = clip(tag(w), nameWidth).padEnd(nameWidth)
+  const name = clip(rowName(w), nameWidth).padEnd(nameWidth)
   const room = cols - prefix.length - name.length - unread.length
   const time = room >= 5 ? ` ${clip(age(w.lastAt, now), 4).padStart(4)}` : ''
   const roomLeft = room - time.length
   const excerpt = roomLeft >= 5 ? ` ${clip(preview, roomLeft - 1)}` : ''
   return (
-    <Button plain autoFocus={opts.autoFocus ? true : undefined} key={`w-${w.name}`} label={`${tag(w)} ${LABEL[w.state]}`} onPress={() => openThread($, w)}>
-      <Text color={COLOR[w.state]}>{prefix}</Text>{name}<Text dimColor>{time}</Text>
-      <Text color="cyan">{unread}</Text>
+    <Button plain hotkey={hotkey} autoFocus={autoFocus ? true : undefined} key={`w-${w.name}`} label={`${tag(w)} ${LABEL[w.state]}`} onPress={() => openThread($, w)}>
+      {gutter}<Text {...toneProps(TONE[w.state])}>{prefix}</Text>{name}<Text dimColor>{time}</Text>
+      {unread}
       <Text dimColor={w.state !== 'ask'}>{excerpt}</Text>
     </Button>
   )
 }
 
 const MSG_GLYPH: Record<CrewMsg['kind'], string> = { ask: GLYPH.ask, done: GLYPH.idle, report: GLYPH.work, out: '' }
-const MSG_COLOR: Record<CrewMsg['kind'], string | undefined> = { ask: COLOR.ask, done: COLOR.idle, report: COLOR.work, out: 'blue' }
+const MSG_COLOR: Record<CrewMsg['kind'], string | undefined> = { ask: TONE.ask, done: undefined, report: TONE.work, out: 'blue' }
 
 /** One thread message: who and when, then its text clamped to `lines`. */
 function messageBody(c: Ctx, w: CrewWorker, m: CrewMsg, lines: number) {
@@ -138,8 +148,8 @@ function detailView($: Engine, c: Ctx, w: CrewWorker) {
       <Text dimColor>{clip(`${w.group ? `${w.group} · ` : ''}${LABEL[w.state]} · ${age(w.startedAt, now)}`, cols)}</Text>
       <Text dimColor>{clip(`${w.cwd} · ${w.model} · last ${age(w.lastAt, now)}${unreadNote}`, cols)}</Text>
       {w.ask && (
-        <Box flexDirection="column" borderStyle="round" borderColor={COLOR.ask} paddingX={1} marginTop={1}>
-          <Text color={COLOR.ask} bold>{`${GLYPH.ask} question · ${age(w.ask.at, now)}`}</Text>
+        <Box flexDirection="column" borderStyle="round" borderColor={TONE.ask} paddingX={1} marginTop={1}>
+          <Text color={TONE.ask} bold>{`${GLYPH.ask} question · ${age(w.ask.at, now)}`}</Text>
           <Text>{v.questionExpanded ? w.ask.text : `${question?.text}${question?.more ? ' …' : ''}`}</Text>
           {question?.more && <Button plain hotkey="d" key="question-expand" label={v.questionExpanded ? 'collapse question' : 'full question'} onPress={() => setView($, { questionExpanded: !v.questionExpanded })} />}
           <Box flexDirection="row" flexWrap="wrap">
@@ -196,7 +206,7 @@ function crewList($: Engine, c: Ctx, shown: CrewWorker[]) {
             <Text bold>{`${g.folded ? '▸' : '▾'} ${g.name}`}</Text>
             <Text dimColor>{`  ${groupSummary(g.workers)}`}</Text>
           </Button>
-          {!g.folded && g.workers.map(w => workerRow($, c, w, { indent: '  ', autoFocus: w === first }))}
+          {!g.folded && g.workers.map(w => workerRow($, c, w, w === first))}
         </Box>
       ))}
       {shown.length === 0 && <Text dimColor>No workers match this filter.</Text>}
@@ -209,7 +219,7 @@ function inboxList($: Engine, c: Ctx, shown: CrewWorker[]) {
   const order = inboxOrder(shown)
   return (
     <Box flexDirection="column">
-      {order.map((w, i) => workerRow($, c, w, { autoFocus: i === 0 }))}
+      {order.map((w, i) => workerRow($, c, w, i === 0))}
       {order.length === 0 && <Text dimColor>No workers match this filter.</Text>}
     </Box>
   )
@@ -229,13 +239,14 @@ function listView($: Engine, c: Ctx) {
   const t = tally(ws)
   const shown = ws.filter(w => matches(w, v.filter))
   const inboxLabel = ['Inbox', t.unread ? `${UNREAD}${t.unread}` : '', t.ask ? `${GLYPH.ask}${t.ask}` : ''].filter(Boolean).join(' ')
+  // `1`-`9` and `n` mean the same in this pane and crew-net's (open an item, send no), so tabs and filters use other keys.
   const tabs: Array<[CrewTab, string, string]> = [
-    ['inbox', '1', inboxLabel],
-    ['crew', '2', `Crew ${t.crew}`],
+    ['inbox', 'm', inboxLabel],
+    ['crew', 'g', `Crew ${t.crew}`],
   ]
   const filters: Array<[CrewFilter, string, string]> = [
     ['all', 'a', `all ${ws.length}`],
-    ['ask', 'n', `${GLYPH.ask} needs you ${t.ask}`],
+    ['ask', 'h', `${GLYPH.ask} needs you ${t.ask}`],
     ['work', 'w', `${GLYPH.work} working ${t.work}`],
     ['idle', 'i', `${GLYPH.idle} idle ${t.idle}`],
     ['gone', 's', `${GLYPH.gone} stopped ${t.gone}`],
@@ -262,7 +273,7 @@ function listView($: Engine, c: Ctx) {
         ))}
       </Box>
       {body}
-      <Box flexDirection="row" flexWrap="wrap"><Text dimColor>1/2 tabs · a n w i s filter · Tab move · Enter activate · Esc/</Text>{closeHint($, c)}</Box>
+      <Box flexDirection="row" flexWrap="wrap"><Text dimColor>1-9 open · m/g tabs · a h w i s filter · Tab move · Enter activate · Esc/</Text>{closeHint($, c)}</Box>
     </Box>
   )
 }
@@ -279,7 +290,7 @@ export const registerPane = (on: On) =>
       now,
       cols,
       narrow: e.props.placement === 'inline' || cols < 60,
-      tagWidth: Math.min(18, Math.floor(cols * 0.4), Math.max(5, ...ws.map(w => tag(w).length))),
+      tagWidth: Math.min(18, Math.floor(cols * 0.4), Math.max(5, ...ws.map(w => rowName(w).length))),
     }
     if (!v.sel) return listView($, c)
     const w = ws.find(x => x.name === v.sel)

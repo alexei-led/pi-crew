@@ -240,14 +240,18 @@ export function classify(text: string, expectsReply = false): { kind: "ask" | "d
   return { kind: expectsReply || /\?\s*$/.test(lastLine) ? "ask" : "report", text: t };
 }
 
-/** A message from the worker. An open question stays open until the lead answers. */
+/**
+ * A message from the worker. An open question stays open until the lead answers. Progress leaves the state alone:
+ * only a task from the lead (applyOut) puts a worker to work, so the "ready" of a worker spawned without a task
+ * keeps it idle and raises no quiet alert.
+ */
 export function applyIn(w: Worker, msg: Msg): Worker {
   const preview = { id: msg.id, at: msg.at, text: clip(msg.text) };
   const next: Worker = { ...w, last: preview, lastAt: msg.at, unread: w.unread + 1 };
   if (w.state === "gone") return next;
   if (msg.kind === "ask") return { ...next, state: "ask", ask: { ...preview, text: clip(msg.text, ASK_LIMIT) } };
-  if (next.ask) return next;
-  return { ...next, state: msg.kind === "done" ? "idle" : "work" };
+  if (next.ask || msg.kind !== "done") return next;
+  return { ...next, state: "idle" };
 }
 
 /** A message from the lead: it answers any open question and puts the worker back to work. */
@@ -315,7 +319,7 @@ export function workerBrief(lead: { name: string; id: string }, worker: { name: 
     `The intercom tool exists in every session. In codemode call it as tools.intercom({ action: "send", to: ..., message: ... }); searchTools("intercom") finds it.`,
     `Rules:`,
     `- Finish each task, question or blocker with exactly one send for that task or question. Progress reports are allowed. A task is not done until its final send succeeds.`,
-    `- Start the message with "Q: " when the lead must decide something, with "DONE: " when the task is finished. Anything else is a progress report.`,
+    `- Start the message with "Q: " when the lead must decide something, with "DONE: " when the task is finished. Anything else is a progress report: it does not wake the lead, who reads it later. Never put a question in one.`,
     `- A DONE report ends with these lines, one each, so the lead can check them; if you changed files, commit first; a task that changes nothing reports the current HEAD. Report the checks you actually ran and their rc; use \`tests: none\` only if you ran none:`,
     `    head: <full commit sha>`,
     `    branch: <branch>`,
@@ -334,13 +338,17 @@ export function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
-/** The launcher a new agterm session runs: fixed intercom id, fixed name, chosen model. */
+/**
+ * The launcher a new agterm session runs: fixed intercom id, fixed name, chosen model. `CREW_NET_ROLE=worker` tells
+ * crew-net, when it is installed, that this session's lead speaks for it: no team items come here and it cannot post.
+ */
 export function launchScript(worker: Pick<Worker, "name" | "id" | "cwd" | "model">, briefPath: string, env: Env = process.env): string {
   return [
     "#!/bin/sh",
     "set -eu",
     `export PATH=${shellQuote(env.PATH ?? "/usr/bin:/bin")}`,
     `export PI_INTERCOM_STABLE_ID=${shellQuote(worker.id)}`,
+    "export CREW_NET_ROLE=worker",
     `cd ${shellQuote(worker.cwd)}`,
     `exec ${shellQuote(env.PI_CREW_PI_COMMAND ?? "pi-work")} --model ${shellQuote(worker.model)} --name ${shellQuote(worker.name)} ${shellQuote(`@${briefPath}`)}`,
     "",

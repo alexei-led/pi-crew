@@ -363,8 +363,17 @@ export function createCrew(dir: string, deps: CrewDeps) {
     return { focused: req.name };
   };
 
+  /** The lead has the message. What it has is not new: a worker's unread never exceeds its messages still in the inbox. */
   const ack = (req: Extract<Request, { op: "ack" }>) => {
+    const from = inbox.get(req.id)?.from.worker;
     if (inbox.delete(req.id)) saveInbox();
+    const w = from ? workers.get(from) : undefined;
+    // The quiet alert is the bridge's own: it never counted as unread.
+    const waiting = [...inbox.values()].filter(m => m.from.worker === from && m.kind !== "idle").length;
+    if (w && w.unread > waiting) {
+      workers.set(w.name, { ...w, unread: waiting });
+      saveWorkers();
+    }
     return { acked: req.id };
   };
 

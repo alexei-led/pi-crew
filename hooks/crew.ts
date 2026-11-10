@@ -1,16 +1,18 @@
 // The lead's side of the bridge: shared state, the bridge client, its supervisor, and the actions the band and pane run.
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface as Engine } from 'claude-code'
+import type { EngineInterface as Engine, PromptSubmitInput, PromptSubmitResult } from 'claude-code'
 
 import type { BridgeEvent, CrewInbound, CrewMsg, CrewRequest, CrewView, CrewWorker } from '../types'
-import { tag, turnText } from './model'
+import { progressText, startsTurn, tag, turnText } from './model'
 
 export const PLUGIN = 'pi-crew'
 export const PANE = 'pi-crew'
-const TITLE = 'Pi crew'
+const TITLE = 'crew'
 // The transcript keeps every message; the pane needs only each worker's latest few.
 const FEED_LIMIT = 200
 const SEEN_LIMIT = 500
+// Progress that waits for the next turn; past this the oldest is dropped unread by the model (the pane still has it).
+const HELD_LIMIT = 50
 const SUBMIT_ATTEMPTS = 10
 const SUBMIT_RETRY_MS = 15_000
 const BRIDGE_ATTEMPTS = 20
@@ -25,6 +27,7 @@ const START: CrewView = { tab: 'inbox', filter: 'all', showAll: false, questionE
 const view = atom({ plugin: 'pi-crew', key: 'view' } as const, START, { shape: 'view-3' })
 const tick = atom({ plugin: 'pi-crew', key: 'tick' } as const, 0, { shape: 'tick-1' })
 const seen = atom({ plugin: 'pi-crew', key: 'seen' } as const, [] as string[], { shape: 'seen-1' })
+const held = atom({ plugin: 'pi-crew', key: 'held' } as const, [] as CrewInbound[], { shape: 'held-1' })
 
 // Module state; a reload re-runs register and session.start, which set it again.
 let bridgeKey = ''
@@ -61,29 +64,83 @@ export async function connect($: Engine) {
   bridgeBin = `${$.plugin.root}/bin/crew-bridge`
 }
 
+/** The lead has these reports: a replay skips them and the bridge stops counting them as new. */
+async function taken($: Engine, events: CrewInbound[]) {
+  await update($, seen, ids => [...ids, ...events.map(ev => ev.id)].slice(-SEEN_LIMIT))
+  for (const ev of events) await call($, { op: 'ack', id: ev.id })
+}
+
+/** Takes what `pick` matches out of the waiting progress, so a turn and a prompt never both carry one report. */
+async function claim($: Engine, pick: (ev: CrewInbound) => boolean): Promise<CrewInbound[]> {
+  let claimed: CrewInbound[] = []
+  await update($, held, list => {
+    claimed = list.filter(pick)
+    return list.filter(ev => !pick(ev))
+  })
+  return claimed
+}
+
+/** Puts claimed progress back to wait, ahead of what arrived since. */
+function restore($: Engine, events: CrewInbound[]) {
+  return update($, held, list => [...events, ...list])
+}
+
+/** A worker's progress waits here, un-acked, so a bridge restart replays it; the band counts it as new. */
+async function hold($: Engine, ev: CrewInbound) {
+  let dropped: CrewInbound[] = []
+  await update($, held, list => {
+    const all = list.some(m => m.id === ev.id) ? list : [...list, ev]
+    dropped = all.slice(0, -HELD_LIMIT)
+    return all.slice(-HELD_LIMIT)
+  })
+  if (dropped.length) await taken($, dropped)
+}
+
 async function deliver($: Engine, ev: CrewInbound) {
   if ((await read($, seen)).includes(ev.id)) {
     await call($, { op: 'ack', id: ev.id })
     return
   }
+  if (!startsTurn(ev)) {
+    await hold($, ev)
+    return
+  }
   const name = ev.from.worker
   const worker = name ? (await read($, workers)).find(w => w.name === name) : undefined
   const peer = name ?? ev.from.name ?? ev.from.id
-  const notes = name ? panelNotes.get(name) : undefined
-  const body = turnText(worker, ev, notes)
   for (let n = 0; n < SUBMIT_ATTEMPTS; n++) {
-    const result = await $.prompt.submit({ text: body })
+    // The turn about a worker carries the progress it sent while the lead was not looking.
+    const earlier = name ? await claim($, m => m.from.worker === name) : []
+    const result = await $.prompt.submit({ text: turnText(worker, ev, name ? panelNotes.get(name) : undefined, earlier) })
     if (!result.drop) {
       if (name) panelNotes.delete(name)
-      await update($, seen, ids => [...ids, ev.id].slice(-SEEN_LIMIT))
-      await call($, { op: 'ack', id: ev.id })
+      await taken($, [...earlier, ev])
       return
     }
+    await restore($, earlier)
     $.ui.log(`pi-crew: report ${ev.id} from ${peer} not submitted (${result.drop}); retrying`, { to: 'debug' })
     await $.clock.sleep(SUBMIT_RETRY_MS)
   }
   // Left un-acked in the bridge inbox: the next bridge start replays it.
   $.ui.toast(`pi-crew: a report from ${peer} could not start a turn; run /reload-plugins to replay it`)
+}
+
+/** The user's own prompt carries the progress that waited, as context the model reads beside it. */
+export async function withProgress(
+  $: Engine, e: PromptSubmitInput, next: (e: PromptSubmitInput) => Promise<PromptSubmitResult>,
+): Promise<PromptSubmitResult> {
+  const waiting = await claim($, () => true)
+  if (waiting.length === 0) return next(e)
+  const ws = await read($, workers)
+  const reports = waiting.map(ev => turnText(ws.find(w => w.name === ev.from.worker), ev))
+  let entered = false
+  try {
+    const result = await next({ ...e, context: [...(e.context ?? []), progressText(reports)] })
+    entered = result.drop === undefined
+    return result
+  } finally {
+    await (entered ? taken($, waiting) : restore($, waiting))
+  }
 }
 
 async function onEvent($: Engine, ev: BridgeEvent) {
@@ -149,11 +206,11 @@ export async function superviseBridge($: Engine) {
   $.ui.status('crew: bridge stopped (run /reload-plugins)')
 }
 
-/** Ages in the band and pane redraw once a minute while anyone works. */
+/** Ages in the band and pane redraw once a minute while any worker is listed: a stopped worker's row shows one too. */
 export async function tickLoop($: Engine) {
   for (;;) {
     await $.clock.sleep(TICK_MS)
-    if ((await read($, workers)).some(w => w.state !== 'gone')) await update($, tick, t => t + 1)
+    if ((await read($, workers)).length > 0) await update($, tick, t => t + 1)
   }
 }
 
