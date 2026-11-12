@@ -335,3 +335,20 @@ test("verifyDone checks the claims against the checkout", async () => {
   const none = mkdtempSync(join(tmpdir(), "pi-crew-nogit-"));
   assert.deepEqual(await verifyDone(good, none, realGit), { ok: false, notes: [`${none} is not a git checkout; head and branch unchecked`] });
 });
+
+test("verifyDone does not claim a clean checkout when git inspection fails", async () => {
+  const { main, wt, head } = repo();
+  const fields = { head, branch: "feat/x", tests: "none", rc: "0", logs: "none" };
+  for (const [cwd, command] of [
+    [wt, "branch --show-current"],
+    [wt, "status --porcelain"],
+    [main, "status --porcelain"],
+    [wt, "worktree list --porcelain"],
+    [wt, "rev-parse --show-toplevel"],
+  ]) {
+    const failingGit: Git = async (dir, args) => dir === cwd && args.join(" ") === command ? undefined : realGit(dir, args);
+    const result = await verifyDone(fields, wt, failingGit);
+    assert.equal(result.ok, false, `${cwd}: ${command}`);
+    assert.ok(result.notes.some(note => note.includes("unchecked")), JSON.stringify(result));
+  }
+});

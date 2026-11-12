@@ -182,7 +182,7 @@ export function createCrew(dir: string, deps: CrewDeps) {
   let announcing = new Promise<void>(resolve => (start = resolve));
   const withChecks = async (event: Inbound): Promise<Inbound> => {
     const w = event.from.worker ? workers.get(event.from.worker) : undefined;
-    if (!w || event.kind !== "done" || event.checks) return event;
+    if (!w || event.kind !== "done") return event;
     const checked = { ...event, checks: await verifyDone(parseDone(classify(event.text).text), w.cwd, git, w.allowDefaultBranch) };
     if (inbox.has(event.id)) {
       inbox.set(event.id, checked);

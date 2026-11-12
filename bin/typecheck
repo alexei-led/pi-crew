@@ -3,6 +3,10 @@
 # The repo has no package.json: typescript and @types/node are installed once into a cache dir.
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
+if [ ! -f "$here/.claude-plugin/types/tsconfig.json" ]; then
+  printf '%s\n' 'Claude Code types are missing. Run claude --plugin-dir . in this checkout once, then retry bin/typecheck.' >&2
+  exit 1
+fi
 cache=${PI_CREW_TYPECHECK_DIR:-${TMPDIR:-/tmp}/pi-crew-typecheck}
 tsc=$cache/node_modules/.bin/tsc
 if [ ! -x "$tsc" ] || [ ! -d "$cache/node_modules/@types/node" ]; then

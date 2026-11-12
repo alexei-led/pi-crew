@@ -240,18 +240,29 @@ test("reports are held until ready, then arrive in order; a DONE carries the git
   assert.equal(lastWorkers(s)[0]!.state, "idle");
 });
 
-test("a DONE left in the inbox by an earlier run is announced with its checks redone", async () => {
+test("a DONE left in the inbox is checked again even when it already has a result", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-crew-unit-"));
   const first = setup({ dir });
   await first.crew.handle({ op: "spawn", name: "api", cwd: "/w" });
-  first.crew.onMessage(peer(API_ID), incoming("d1", "DONE: shipped"));
+  const head = "a".repeat(40);
+  const outputs = [["rev-parse HEAD", head], ["branch --show-current", "feat/x"], ["status --porcelain", ""], ["worktree list --porcelain", "worktree /w"], ["rev-parse --show-toplevel", "/w"]];
+  for (const [args, out] of outputs) first.gitOut.set(args!, out!);
+  first.crew.ready();
+  first.crew.onMessage(peer(API_ID), incoming("d1", `DONE: shipped\nhead: ${head}\nbranch: feat/x\ntests: none\nrc: 0\nlogs: none`));
+  await until(() => eventsOf(first, "message").length === 1, "the first DONE");
+  assert.deepEqual(json(dir, "inbox.json")[0].checks, { ok: true, notes: [] });
+
   const second = setup({ dir });
+  for (const [args, out] of outputs) second.gitOut.set(args!, out!);
+  second.gitOut.set("status --porcelain", " M changed.txt");
   second.crew.ready();
   await until(() => eventsOf(second, "message").length === 1, "the replayed DONE");
-  const [done] = eventsOf(second, "message") as any[];
+  const done = eventsOf(second, "message")[0]!;
   assert.equal(done.id, "d1");
-  assert.equal(done.checks.ok, false);
-  assert.equal(json(dir, "inbox.json")[0].checks.ok, false);
+  assert.equal(done.kind, "done");
+  if (done.kind !== "done") throw new Error("expected DONE");
+  assert.deepEqual(done.checks, { ok: false, notes: ["uncommitted changes in /w: 1 path(s)"] });
+  assert.deepEqual(json(dir, "inbox.json")[0].checks, done.checks);
 });
 
 test("stop closes the session and marks the worker gone; a second stop forgets it", async () => {
