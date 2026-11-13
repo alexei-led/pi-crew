@@ -1,34 +1,24 @@
 import type { On } from 'claude-code'
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
-const props = {
-  title: 'crew',
-  isFocused: true,
-  bodyColumns: 90,
-  placement: 'dock',
-  scroll: { offset: 0, bodyRows: 30 },
-  view: {},
-} as const
-const PANE = { plugin: 'pi-crew', component: 'Pane', requestId: 'pi-crew', props } as const
-const BAND = {
-  plugin: 'pi-crew',
-  component: 'AbovePrompt',
-  props: { hasSurvey: false, isWorking: false, maxRows: 3, bodyColumns: 120, scroll: { offset: 0, bodyRows: 3 }, view: {} },
-} as const
-
+const props = { title: 'crew', isFocused: true, bodyColumns: 90, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} } as const
+const PANE = { plugin: 'pi-crew', component: 'Pane', requestId: 'pi-crew', props, surface: 'terminal' } as const
+const BAND = { plugin: 'pi-crew', component: 'AbovePrompt', surface: 'terminal', props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 3, bodyColumns: 120, scroll: { offset: 0, bodyRows: 3 }, view: {} } } as const
 const worker = (name: string, n: number, more: Record<string, unknown> = {}) => ({
-  name, n, id: name, cwd: '/w', model: 'router/openai-work', state: 'work', unread: 0, startedAt: 0, lastAt: 0, ...more,
+  name, n, id: name, agtermSession: name + '-terminal', runId: name + '-run', cwd: '/w', model: 'model', state: 'work', unread: 3, startedAt: 0, lastAt: 0,
+  task: { text: 'Implement ' + name, at: 0 }, ...more,
 })
-const msg = (i: number, worker: string, kind = 'report') => ({ id: `${worker}-${i}`, at: i, kind, text: `${worker} message ${i}`, worker, peer: worker })
+const workers = [worker('api', 1, { state: 'ask', ask: { id: 'q', at: 0, text: 'Use Postgres?' } }), worker('web', 2, { group: 'app' }), worker('old', 3, { state: 'gone' })]
+const message = (i: number, more: Record<string, unknown> = {}) => ({ id: 'm' + i, at: i, kind: 'report', text: 'report ' + i, worker: 'api', runId: 'api-run', peer: 'api', sender: 'worker', ...more })
+const history = { name: 'api', runId: 'api-run', messages: [message(1, { kind: 'out', sender: 'lead', text: 'Use the shared component' }), message(2)], hasOlder: true }
+const view = (more: Record<string, unknown> = {}) => ({ collapsed: [], expanded: [], following: true, newer: [], request: 0, ...more })
 
-const WORKERS = [
-  worker('api', 1, { state: 'ask', unread: 1, ask: { id: 'q', at: 0, text: 'Use Postgres?' } }),
-  worker('web', 2, { group: 'ui' }),
-  worker('old', 3, { state: 'gone' }),
-]
-const FEED = [...Array.from({ length: 6 }, (_, i) => msg(i, 'api')), msg(9, 'api', 'ask')]
-
-function seed(on: On, values: Record<string, { shape: string; value: unknown }>) {
+function world(on: On, options: { selected?: boolean; view?: Record<string, unknown>; workers?: object[] } = {}) {
+  const ws = options.workers ?? workers
+  const values: Record<string, { shape: string; value: unknown }> = {
+    workers: { shape: 'workers-1', value: ws },
+    view: { shape: 'view-4', value: view({ ...(options.selected ? { sel: 'api', runId: 'api-run', history } : {}), ...options.view }) },
+  }
   let version = 1
   on('state.get', (_, e) => ({ value: { value: values[(e as { key: string }).key], version } }))
   on('state.set', (_, e) => {
@@ -36,364 +26,207 @@ function seed(on: On, values: Record<string, { shape: string; value: unknown }>)
     values[event.key] = event.value
     return { value: { isSet: true, version: ++version } }
   })
-  on('clock.now', () => ({ value: 60_000 }))
-}
-
-test('the band counts states and shows the oldest question', async ($, on) => {
-  seed(on, { workers: { shape: 'workers-1', value: WORKERS } })
-  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect((await ui.find({ type: 'Button', key: 'next' }))?.text).toMatch(/◆ 1 api 1m: Use Postgres\?/)
-  expect(await ui.find({ type: 'Button', key: 'gone' })).toBeTruthy()
-  await ui.unmount()
-})
-
-test('the band stays hidden with no workers', async ($, on) => {
-  seed(on, {})
-  on('ui.render', ($, e) => {
-    const { Text } = $.ui.resolve(e)
-    return <Text>engine</Text>
-  })
-  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect(await ui.find({ type: 'Button', key: 'crew' })).toBeFalsy()
-  await ui.unmount()
-})
-
-test('the band draws its line above what the next band renderer returns', async ($, on) => {
-  seed(on, { workers: { shape: 'workers-1', value: WORKERS } })
-  on('ui.render', ($, e) => {
-    const { Text } = $.ui.resolve(e)
-    return <Text>team · ✉ 2 new</Text>
-  })
-  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect(await ui.find({ type: 'Button', key: 'crew' })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: 'team · ✉ 2 new' })).toBeTruthy()
-  expect((await ui.find({ type: 'Box' }))?.text).toMatch(/^crew 2.*team · ✉ 2 new$/s)
-  await ui.unmount()
-})
-
-test('the inbox lists the asking worker first', async ($, on) => {
-  seed(on, { workers: { shape: 'workers-1', value: WORKERS } })
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  const rows = (await ui.findAll({ type: 'Button' })).filter(b => String(b.key).startsWith('w-'))
-  expect(rows.map(r => r.key)).toEqual(['w-api', 'w-web', 'w-old'])
-  await ui.unmount()
-})
-
-test('a worker shows its question and only the latest three messages', async ($, on) => {
-  seed(on, {
-    workers: { shape: 'workers-1', value: WORKERS },
-    feed: { shape: 'feed-1', value: FEED },
-    view: { shape: 'view-3', value: { tab: 'inbox', filter: 'all', sel: 'api', showAll: false, questionExpanded: false, collapsed: [] } },
-  })
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /Use Postgres\?/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Button', key: 'yes' })).toBeTruthy()
-  expect(await ui.find({ key: 'question-expand' })).toBeFalsy()
-  expect((await ui.find({ type: 'Text', text: /^latest/ }))?.text).toMatch(/latest 3 of 7/)
-  expect(await ui.find({ type: 'Text', text: /api message 4/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /api message 3/ })).toBeFalsy()
-  expect(await ui.find({ type: 'Button', key: 'more' })).toBeTruthy()
-  await ui.unmount()
-})
-
-test('a stored view of another shape falls back to the inbox', async ($, on) => {
-  seed(on, {
-    workers: { shape: 'workers-1', value: WORKERS },
-    view: { shape: 'view-1', value: { tab: 'feed', filter: 'all', sel: 'api', showAll: true, collapsed: [] } },
-  })
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Button', key: 'yes' })).toBeFalsy()
-  expect(await ui.find({ type: 'Button', key: 'tab-inbox' })).toBeTruthy()
-  await ui.unmount()
-})
-
-
-for (const sel of [undefined, 'api', 'missing']) {
-  for (const [key, hotkey] of [['quit', 'q'], ['close', 'x']] as const) {
-    test(`${hotkey} closes ${sel ?? 'list'}`, async ($, on) => {
-      seed(on, {
-        workers: { shape: 'workers-1', value: WORKERS },
-        view: { shape: 'view-3', value: { tab: 'inbox', filter: 'all', sel, showAll: false, questionExpanded: false, collapsed: [] } },
-      })
-      let closed = ''
-      on('ui.close', (_, e) => { closed = e.id; return { value: undefined } })
-      const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-      expect((await ui.find({ type: 'Button', key }))?.props.hotkey).toBe(hotkey)
-      await ui.press({ key })
-      expect(closed).toBe('pi-crew')
-      await ui.unmount()
-    })
-  }
-}
-
-test('word filters use a h w i s', async ($, on) => {
-  const values = { workers: { shape: 'workers-1', value: [...WORKERS, worker('quiet', 4, { state: 'idle' })] } }
-  seed(on, values)
-  for (const [filter, key, label, names] of [
-    ['all', 'a', 'all 4', ['w-api', 'w-web', 'w-quiet', 'w-old']],
-    ['ask', 'h', '◆ needs you 1', ['w-api']],
-    ['work', 'w', '● working 1', ['w-web']],
-    ['idle', 'i', '○ idle 1', ['w-quiet']],
-    ['gone', 's', '✕ stopped 1', ['w-old']],
-  ] as const) {
-    let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    const chip = await ui.find({ type: 'Button', key: `f-${filter}` })
-    expect(chip?.props.hotkey).toBe(key)
-    expect(chip?.text).toMatch(new RegExp(label))
-    await ui.press({ key: `f-${filter}` })
-    await ui.unmount()
-    ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    const rows = (await ui.findAll({ type: 'Button' })).filter(b => String(b.key).startsWith('w-'))
-    expect(rows.map(r => r.key)).toEqual([...names])
-    expect(rows[0]?.props.autoFocus).toBe(true)
-    await ui.unmount()
-  }
-})
-
-test('a digit opens the worker with that number; m and g switch tabs; no list key is a shared answer key', async ($, on) => {
-  const values: Record<string, { shape: string; value: unknown }> = {
-    workers: { shape: 'workers-1', value: [...WORKERS, worker('late', 12)] },
-  }
-  seed(on, values)
-  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  const hotkeys = async (prefix: string) =>
-    (await ui.findAll({ type: 'Button' })).filter(b => String(b.key).startsWith(prefix)).map(b => [b.key, b.props.hotkey])
-  expect(await hotkeys('w-')).toEqual([['w-api', '1'], ['w-web', '2'], ['w-late', undefined], ['w-old', '3']])
-  expect(await hotkeys('tab-')).toEqual([['tab-inbox', 'm'], ['tab-crew', 'g']])
-  const used = (await ui.findAll({ type: 'Button' })).map(b => b.props.hotkey)
-  for (const shared of ['n', 'y', 'r', 'b', 'o', 'e', 'c', 'v']) expect(used.includes(shared)).toBe(false)
-  expect((await ui.find({ type: 'Button', key: 'w-web' }))?.text).toMatch(/^● web /)
-  expect((await ui.find({ type: 'Button', key: 'w-late' }))?.text).toMatch(/^   ● 12 late /)
-  await ui.press({ key: 'w-web' })
-  expect((values.view?.value as { sel?: string }).sel).toBe('web')
-  await ui.unmount()
-  values.view = { shape: 'view-3', value: { tab: 'inbox', filter: 'all', showAll: false, questionExpanded: false, collapsed: [] } }
-  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  await ui.press({ key: 'tab-crew' })
-  expect((values.view.value as { tab: string }).tab).toBe('crew')
-  await ui.unmount()
-})
-
-for (const state of ['work', 'gone']) {
-  test(`${state} requires s then c, and other actions cancel`, async ($, on) => {
-    seed(on, {
-      workers: { shape: 'workers-1', value: [worker('api', 1, { state })] },
-      view: { shape: 'view-3', value: { tab: 'crew', filter: 'all', sel: 'api', showAll: false, questionExpanded: false, collapsed: [] } },
-    })
-    let attempts = 0
-    on('ui.toast', () => { attempts++; return { value: undefined } })
-    let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    expect(await ui.find({ key: 'confirm' })).toBeFalsy()
-    expect((await ui.find({ key: 'stop' }))?.props.hotkey).toBe('s')
-    await ui.press({ key: 'stop' })
-    await ui.unmount()
-    ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    expect(attempts).toBe(0)
-    expect((await ui.find({ key: 'confirm' }))?.props.hotkey).toBe('c')
-    expect((await ui.find({ key: 'confirm' }))?.props.autoFocus).toBeFalsy()
-    expect((await ui.find({ key: 'cancel' }))?.props.hotkey).toBe('v')
-    await ui.press({ key: 'cancel' })
-    await ui.unmount()
-    ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    expect(await ui.find({ key: 'confirm' })).toBeFalsy()
-    await ui.press({ key: 'stop' })
-    await ui.unmount()
-    ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    expect(attempts).toBe(0)
-    await ui.press({ key: 'confirm' })
-    expect(attempts).toBe(1)
-    await ui.unmount()
-    ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    expect(await ui.find({ key: 'confirm' })).toBeFalsy()
-    await ui.unmount()
-  })
-}
-
-test('a cut question expands and collapses with d', async ($, on) => {
-  const text = 'question '.repeat(100) + 'THE END'
-  seed(on, {
-    workers: { shape: 'workers-1', value: [worker('api', 1, { state: 'ask', ask: { id: 'q', at: 0, text } })] },
-    view: { shape: 'view-3', value: { tab: 'crew', filter: 'ask', sel: 'api', showAll: false, questionExpanded: false, collapsed: [] } },
-  })
-  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /THE END/ })).toBeFalsy()
-  expect(await ui.find({ type: 'Text', text: / …$/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /d full question/ })).toBeTruthy()
-  expect((await ui.find({ key: 'question-expand' }))?.props.hotkey).toBe('d')
-  await ui.press({ key: 'question-expand' })
-  await ui.unmount()
-  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect((await ui.find({ type: 'Text', text: /THE END/ }))?.text).toBe(text)
-  expect(await ui.find({ type: 'Text', text: /d collapse question/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /d full question/ })).toBeFalsy()
-  await ui.press({ key: 'question-expand' })
-  await ui.unmount()
-  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /THE END/ })).toBeFalsy()
-  await ui.unmount()
-})
-
-test('40 columns clips long worker tags before the age and preview', async ($, on) => {
-  const name = 'a'.repeat(32)
-  seed(on, { workers: { shape: 'workers-1', value: [worker(name, 1)] } })
-  const ui = await $.ui.mount({ ...PANE, props: { ...props, bodyColumns: 40, placement: 'inline' }, surface: 'terminal' })
-  const row = await ui.find({ key: `w-${name}` })
-  expect(row?.props.hotkey).toBe('1')
-  expect(row?.text).toMatch(/^● a+…/)
-  expect((row?.text ?? '').length <= 40 - 3).toBe(true)
-  await ui.unmount()
-})
-
-test('the band hides zero chips and exposes c a u navigation', async ($, on) => {
-  seed(on, { workers: { shape: 'workers-1', value: [WORKERS[0]] } })
-  const opens: Array<{ id: string; closeOnEscape?: boolean }> = []
-  on('ui.open', (_, e) => { opens.push(e); return { value: { isPlaced: true } } })
-  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  for (const key of ['work', 'idle', 'gone']) expect(await ui.find({ type: 'Button', key })).toBeFalsy()
-  for (const [key, hotkey] of [['crew', 'c'], ['next', 'a'], ['unread', 'u']] as const) {
-    expect((await ui.find({ type: 'Button', key }))?.props.hotkey).toBe(hotkey)
-    await ui.press({ key })
-  }
-  expect(opens.map(e => [e.id, e.closeOnEscape])).toEqual([['pi-crew', true], ['pi-crew', true], ['pi-crew', true]])
-  expect((await ui.find({ key: 'next' }))?.props.dimColor).toBeFalsy()
-  await ui.unmount()
-})
-
-test('the narrow band drops secondary chips before the question', async ($, on) => {
-  seed(on, { workers: { shape: 'workers-1', value: WORKERS } })
-  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 40 }, surface: 'terminal' })
-  expect(await ui.find({ key: 'work' })).toBeFalsy()
-  expect((await ui.find({ key: 'next' }))?.text).toMatch(/^◆ 1 /)
-  const tree = await ui.findAll({ type: 'Button' })
-  const width = tree.reduce((n, b) => n + b.text.length + (b.props.hotkey ? 3 : 0), (tree.length - 1) * 3)
-  expect(width <= 40).toBe(true)
-  await ui.unmount()
-})
-
-test('unread room never shortens the question below its worker number', async ($, on) => {
-  seed(on, { workers: { shape: 'workers-1', value: [worker('api', 1, { state: 'ask', unread: 2, ask: { id: 'q', at: 0, text: 'Use Postgres?' } })] } })
-  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 31 }, surface: 'terminal' })
-  expect((await ui.find({ key: 'next' }))?.text).toBe('◆ 1')
-  expect(await ui.find({ key: 'unread' })).toBeTruthy()
-  await ui.unmount()
-})
-
-test('/crew opens an Escape-closeable pane', async ($, on) => {
-  seed(on, {})
-  let escape: boolean | undefined
-  on('ui.open', (_, e) => { escape = e.closeOnEscape; return { value: { isPlaced: true } } })
-  await $.command.run({
-    command: 'crew', args: '', origin: { kind: 'plugin', name: 'pi-crew' }, presentation: { isFullscreen: false, columns: 80 },
-  })
-  expect(escape).toBe(true)
-})
-
-test('back keeps the Crew tab and filter, and disarms stop', async ($, on) => {
-  const values = {
-    workers: { shape: 'workers-1', value: WORKERS },
-    view: { shape: 'view-3', value: { tab: 'crew', filter: 'ask', sel: 'api', showAll: false, questionExpanded: false, collapsed: [], confirmStop: 'api' } },
-  }
-  seed(on, values)
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  await ui.press({ key: 'back' })
-  expect(values.view.value).toMatchObject({ tab: 'crew', filter: 'ask' })
-  expect(values.view.value.sel).toBeUndefined()
-  expect(values.view.value.confirmStop).toBeUndefined()
-  await ui.unmount()
-})
-
-test('done messages are neutral, and narrow detail keeps actions separate from identity', async ($, on) => {
-  const name = 'a'.repeat(32)
-  seed(on, {
-    workers: { shape: 'workers-1', value: [worker(name, 1, { agtermSession: 'session' })] },
-    feed: { shape: 'feed-1', value: [msg(1, name, 'done')] },
-    view: { shape: 'view-3', value: { tab: 'inbox', filter: 'all', sel: name, showAll: false, questionExpanded: false, collapsed: [] } },
-  })
-  const ui = await $.ui.mount({ ...PANE, props: { ...props, bodyColumns: 40, placement: 'inline' }, surface: 'terminal' })
-  for (const key of ['back', 'close', 'open', 'stop', 'quit']) expect(await ui.find({ type: 'Button', key })).toBeTruthy()
-  expect((await ui.find({ type: 'Text', text: `○ ${name}` }))?.props.color).toBeUndefined()
-  const buttons = await ui.findAll({ type: 'Button' })
-  expect(buttons.every(b => !b.text.includes(name))).toBe(true)
-  expect((await ui.find({ type: 'Input', key: `reply-${name}` }))?.props.placeholder).toBe(`message 1 ${name} · Enter sends`)
-  await ui.unmount()
-})
-
-test('the wide band labels nonzero states and the compact band shortens them', async ($, on) => {
-  seed(on, { workers: { shape: 'workers-1', value: [worker('a', 1), worker('b', 2, { state: 'idle' }), worker('c', 3, { state: 'gone' })] } })
-  let ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  for (const [key, label] of [['work', '● 1 working'], ['idle', '○ 1 idle'], ['gone', '✕ 1 stopped']]) expect((await ui.find({ type: 'Button', key }))?.text).toBe(label)
-  await ui.unmount()
-  ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: 20 }, surface: 'terminal' })
-  expect((await ui.find({ type: 'Button', key: 'work' }))?.text).toBe('●1')
-  await ui.unmount()
-})
-
-test('the band counts open questions and answers the oldest in ask color', async ($, on) => {
-  const values: Record<string, { shape: string; value: unknown }> = {
-    workers: { shape: 'workers-1', value: [
-      worker('later', 4, { state: 'ask', ask: { id: 'later', at: 30_000, text: 'Another question?' } }),
-      WORKERS[0],
-    ] },
-  }
-  seed(on, values)
-  on('ui.open', () => ({ value: { isPlaced: true } }))
-  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect((await ui.find({ type: 'Button', key: 'next' }))?.text).toBe('◆ 2 asks · 1 api 1m: Use Postgres?')
-  expect((await ui.find({ type: 'Text', text: /^◆ 2 asks · 1 api/ }))?.props.color).toBe('warning')
-  expect((await ui.find({ type: 'Button', key: 'next' }))?.props.hotkey).toBe('a')
-  await ui.press({ key: 'next' })
-  expect(values.view?.value).toMatchObject({ tab: 'inbox', filter: 'ask', sel: 'api' })
-  await ui.unmount()
-})
-
-test('band tones are the theme keys of the screen contract: warning, success, normal, dim', async ($, on) => {
-  seed(on, { workers: { shape: 'workers-1', value: [...WORKERS, worker('quiet', 4, { state: 'idle' })] } })
-  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect((await ui.find({ type: 'Text', text: /^◆ 1 api/ }))?.props.color).toBe('warning')
-  expect((await ui.find({ type: 'Text', text: /^● 1 working$/ }))?.props.color).toBe('success')
-  const unread = await ui.find({ type: 'Text', text: /^✉ 1 new$/ })
-  expect([unread?.props.color, unread?.props.dimColor]).toEqual([undefined, undefined])
-  expect((await ui.find({ type: 'Text', text: /^○ 1 idle$/ }))?.props.dimColor).toBe(true)
-  expect((await ui.find({ type: 'Text', text: /^✕ 1 stopped$/ }))?.props.dimColor).toBe(true)
-  await ui.unmount()
-})
-
-
-for (const columns of [15, 40, 79, 80, 120]) {
-  test(`band priority layout fits ${columns} columns with long names and two questions`, async ($, on) => {
-    seed(on, { workers: { shape: 'workers-1', value: [
-      worker('a'.repeat(32), 1, { state: 'ask', unread: 2, ask: { id: 'q1', at: 0, text: 'Use Postgres?' } }),
-      worker('later', 2, { state: 'ask', ask: { id: 'q2', at: 1, text: 'Later question?' } }),
-      worker('working', 3), worker('idle', 4, { state: 'idle' }), worker('gone', 5, { state: 'gone' }),
-    ] } })
-    const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: columns }, surface: 'terminal' })
-    const text = (await ui.find({ type: 'Box' }))?.text ?? ''
-    const buttons = await ui.findAll({ type: 'Button' })
-    const width = text.length + buttons.filter(b => b.props.hotkey).length * 3
-    expect(width <= columns).toBe(true)
-    expect((await ui.find({ type: 'Button', key: 'crew' }))?.text).toBe('crew 4')
-    const question = await ui.find({ type: 'Button', key: 'next' })
-    expect(question?.text).toMatch(/^◆(?: 2 asks|2)/)
-    if (columns === 15) expect(question?.text).toBe('◆2')
-    if (columns === 40) {
-      expect(await ui.find({ type: 'Button', key: 'unread' })).toBeTruthy()
-      expect(await ui.find({ type: 'Button', key: 'work' })).toBeFalsy()
+  const clock = mock.clock(on)
+  const calls: Array<Record<string, unknown>> = []
+  const pages: object[] = []
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  for (const event of ['tool.register', 'command.register', 'ui.status', 'ui.log', 'ui.toast'] as const) on(event, () => ({ value: undefined }))
+  on('process.run', (_, e) => {
+    let stdout = 'pane-1'
+    if (e.argv[0] !== 'sh') {
+      const req = JSON.parse(e.argv.at(-1) ?? '{}')
+      calls.push(req)
+      stdout = JSON.stringify({ ok: true, ...(pages.shift() ?? history) })
     }
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('process.spawn', async function* () {
+    yield { stream: 'stdout' as const, text: JSON.stringify({ type: 'ready', lead: { id: 'lead', name: 'Lead' }, workers: ws, agtermSession: 's', feed: [] }) + '\n' }
+    await clock.sleep(86_400_000)
+    return { value: { code: 0, signal: null } }
+  })
+  on('ui.scroll', () => ({}))
+  return { values, calls, pages, clock }
+}
+
+test('observer overview shows assignments, waiting on lead, and no management controls', async ($, on) => {
+  world(on)
+  const ui = await $.ui.mount(PANE)
+  expect((await ui.find({ type: 'Box' }))?.text).toMatch(/Implement api/)
+  expect((await ui.find({ type: 'Box' }))?.text).toMatch(/waiting on lead/)
+  expect(await ui.find({ type: 'Input' })).toBeFalsy()
+  for (const key of ['tab-inbox', 'tab-crew', 'f-ask', 'stop', 'yes', 'no', 'confirm']) expect(await ui.find({ key })).toBeFalsy()
+  expect(await ui.find({ key: 'w-api' })).toBeTruthy()
+  await ui.unmount()
+})
+
+test('a thread names actual actors and does not turn a question into human work', async ($, on) => {
+  world(on, { selected: true })
+  const ui = await $.ui.mount(PANE)
+  const text = (await ui.find({ type: 'Box' }))?.text ?? ''
+  expect(text).toMatch(/Lead → api/)
+  expect(text).toMatch(/api → Lead/)
+  expect(text).toMatch(/Use Postgres\?/)
+  expect(text).not.toMatch(/you|send yes|send no/)
+  expect(await ui.find({ type: 'Input' })).toBeFalsy()
+  expect(await ui.find({ key: 'older' })).toBeTruthy()
+  await ui.unmount()
+})
+
+test('unknown legacy outgoing authors are not relabeled as Lead', async ($, on) => {
+  world(on, { selected: true, view: { history: { ...history, messages: [message(1, { kind: 'out', sender: undefined })] } } })
+  const ui = await $.ui.mount(PANE)
+  expect((await ui.find({ type: 'Box' }))?.text).toMatch(/To api/)
+  expect((await ui.find({ type: 'Box' }))?.text).not.toMatch(/Lead → api/)
+  await ui.unmount()
+})
+
+test('opening and paging a conversation only queries history', async ($, on) => {
+  const w = world(on)
+  await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })
+  await w.clock.settle()
+  let ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'w-api' })
+  await ui.unmount()
+  expect(w.calls.map(c => c.op)).toEqual(['history'])
+  w.pages.push({ ...history, messages: [message(0)], hasOlder: false })
+  ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'older' })
+  expect(w.calls.map(c => c.op)).toEqual(['history', 'history'])
+  expect(w.calls[1]?.before).toBe('m1')
+  expect((w.values.workers?.value as Array<{ unread: number }>)[0]?.unread).toBe(3)
+  await ui.unmount()
+})
+
+test('DONE check results are evidence, not a claim that tests ran', async ($, on) => {
+  world(on, { selected: true, view: { history: { ...history, hasOlder: false, messages: [message(3, { kind: 'done', checks: { ok: false, notes: ['branch mismatch'], at: 1 } })] } } })
+  const ui = await $.ui.mount(PANE)
+  const text = (await ui.find({ type: 'Box' }))?.text ?? ''
+  expect(text).toMatch(/DONE reported/)
+  expect(text).toMatch(/branch mismatch/)
+  expect(text).toMatch(/Does not prove tests ran/)
+  await ui.unmount()
+})
+
+test('reading history exposes a latest action without altering manager unread state', async ($, on) => {
+  world(on, { selected: true, view: { following: false, newer: ['n1', 'n2'] } })
+  const ui = await $.ui.mount(PANE)
+  expect((await ui.find({ key: 'latest' }))?.text).toMatch(/2 newer/)
+  expect(await ui.find({ type: 'Input' })).toBeFalsy()
+  await ui.unmount()
+})
+
+test('a respawn does not display the prior run conversation under the new worker', async ($, on) => {
+  world(on, { selected: true, workers: [worker('api', 4, { runId: 'replacement' })] })
+  const ui = await $.ui.mount(PANE)
+  expect((await ui.find({ type: 'Box' }))?.text).toMatch(/restarted/)
+  expect((await ui.find({ type: 'Box' }))?.text).not.toMatch(/report 2/)
+  await ui.unmount()
+})
+
+for (const [placement, width] of [['dock', 40], ['dock', 90], ['inline', 24]] as const) {
+  test('observer navigation fits ' + placement + ' at ' + width + ' columns', async ($, on) => {
+    world(on, { selected: true })
+    const ui = await $.ui.mount({ ...PANE, props: { ...props, placement, bodyColumns: width } })
+    expect(await ui.find({ key: 'back' })).toBeTruthy()
+    expect(await ui.find({ key: 'latest' })).toBeTruthy()
+    expect(await ui.find({ type: 'Input' })).toBeFalsy()
     await ui.unmount()
   })
 }
 
-test('a grouped 24-column worker row clips its tag and drops preview before age', async ($, on) => {
-  const name = 'a'.repeat(32)
-  seed(on, {
-    workers: { shape: 'workers-1', value: [worker(name, 12, { group: 'app', unread: 99, last: { id: 'last', at: 0, text: 'preview must disappear' } })] },
-    view: { shape: 'view-3', value: { tab: 'crew', filter: 'all', showAll: false, questionExpanded: false, collapsed: [] } },
+test('an old view shape resets to the observer overview', async ($, on) => {
+  const w = world(on)
+  w.values.view = { shape: 'view-3', value: { tab: 'inbox', sel: 'api' } }
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ key: 'w-api' })).toBeTruthy()
+  expect(await ui.find({ key: 'yes' })).toBeFalsy()
+  await ui.unmount()
+})
+
+test('the band keeps status but removes unread and answer actions', async ($, on) => {
+  world(on)
+  const ui = await $.ui.mount(BAND)
+  const text = (await ui.find({ type: 'Box' }))?.text ?? ''
+  expect(text).toMatch(/crew 2/)
+  expect(text).toMatch(/waiting/)
+  expect(text).not.toMatch(/new|needs you/)
+  expect(await ui.find({ key: 'unread' })).toBeFalsy()
+  expect(await ui.find({ key: 'next' })).toBeFalsy()
+  await ui.unmount()
+})
+
+test('the band yields when empty and preserves another plugin band', async ($, on) => {
+  world(on, { workers: [] })
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>team</Text>
   })
-  const ui = await $.ui.mount({ ...PANE, props: { ...props, bodyColumns: 24, placement: 'inline' }, surface: 'terminal' })
-  const row = await ui.find({ type: 'Button', key: `w-${name}` })
-  expect((row?.text ?? '').length <= 24).toBe(true)
-  expect(row?.text).toMatch(/^   ● 12 a+…/)
-  expect(row?.text).toMatch(/1m.*✉99/)
-  expect(row?.text.includes('preview')).toBe(false)
+  const ui = await $.ui.mount(BAND)
+  expect(await ui.find({ key: 'crew' })).toBeFalsy()
+  expect(await ui.find({ type: 'Text', text: 'team' })).toBeTruthy()
+  await ui.unmount()
+})
+
+test('/crew opens an Escape-closeable observer pane', async ($, on) => {
+  world(on)
+  let opened: object | undefined
+  on('ui.open', (_, e) => { opened = e; return { value: { isPlaced: true, isFocused: true, requestId: 'pi-crew' } } })
+  await $.command.run({ command: 'crew', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 120 } })
+  expect(opened).toMatchObject({ id: 'pi-crew', closeOnEscape: true })
+})
+
+
+test('an expired history cursor keeps the snapshot and offers latest instead of silently jumping', async ($, on) => {
+  const w = world(on, { selected: true });
+  await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true });
+  await w.clock.settle();
+  w.pages.push({ ok: false, error: 'history cursor expired' });
+  const ui = await $.ui.mount(PANE);
+  await ui.press({ key: 'older' });
+  await ui.unmount();
+  const next = await $.ui.mount(PANE);
+  expect((await next.find({ type: 'Box' }))?.text).toMatch(/history cursor expired/);
+  expect((await next.find({ type: 'Box' }))?.text).toMatch(/report 2/);
+  expect(await next.find({ key: 'latest' })).toBeTruthy();
+  expect(w.calls.every(c => c.op === 'history')).toBe(true);
+  await next.unmount();
+});
+
+
+test('opening a worker terminal navigates without sending or acknowledging messages', async ($, on) => {
+  const w = world(on, { selected: true });
+  await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true });
+  await w.clock.settle();
+  const ui = await $.ui.mount(PANE);
+  await ui.press({ key: 'open' });
+  expect(w.calls.at(-1)).toMatchObject({ op: 'focus', name: 'api' });
+  expect(w.calls.every(c => c.op === 'history' || c.op === 'focus')).toBe(true);
+  expect((w.values.workers?.value as Array<{ unread: number }>)[0]?.unread).toBe(3);
+  await ui.unmount();
+});
+
+test('long messages expand locally without a transport operation', async ($, on) => {
+  const text = 'large message '.repeat(80) + 'END-OF-MESSAGE';
+  const w = world(on, { selected: true, view: { history: { ...history, messages: [message(1, { text })] } } });
+  let ui = await $.ui.mount(PANE);
+  expect((await ui.find({ type: 'Box' }))?.text).not.toMatch(/END-OF-MESSAGE/);
+  await ui.press({ key: 'expand-m1' });
+  await ui.unmount();
+  ui = await $.ui.mount(PANE);
+  expect((await ui.find({ type: 'Box' }))?.text).toMatch(/END-OF-MESSAGE/);
+  expect(w.calls).toEqual([]);
+  await ui.unmount();
+});
+
+test('a nonempty crew band stacks with another plugin instead of replacing it', async ($, on) => {
+  world(on)
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>team band</Text>
+  })
+  const ui = await $.ui.mount(BAND)
+  expect(await ui.find({ key: 'crew' })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: 'team band' })).toBeTruthy()
   await ui.unmount()
 })

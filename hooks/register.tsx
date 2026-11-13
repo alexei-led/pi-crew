@@ -2,7 +2,7 @@ import type { Register } from 'claude-code'
 
 import type { CrewRequest } from '../types'
 import { registerBand } from './band'
-import { PLUGIN, call, connect, connected, setView, showPane, superviseBridge, tickLoop, withProgress } from './crew'
+import { PLUGIN, call, connect, connected, openPane, superviseBridge, tickLoop, withProgress } from './crew'
 import { registerPane } from './pane'
 
 const TOOLS = [
@@ -39,6 +39,7 @@ const TOOLS = [
         to: { type: 'string' },
         text: { type: 'string' },
         replyTo: { type: 'string', description: 'Message id being answered.' },
+        task: { type: 'string', description: 'Short assignment summary for a NEW task. Omit for answers or progress nudges.' },
       },
       required: ['to', 'text'],
     },
@@ -65,7 +66,7 @@ const OPS: { [K in ToolOp]: (input: Omit<ToolRequest<K>, 'op'>) => ToolRequest<K
     op: 'spawn', name: input.name, cwd: input.cwd, model: input.model, task: input.task, group: input.group,
     allowDefaultBranch: input.allowDefaultBranch,
   }),
-  send: input => ({ op: 'send', to: input.to, text: input.text, replyTo: input.replyTo }),
+  send: input => ({ op: 'send', to: input.to, text: input.text, replyTo: input.replyTo, task: input.task }),
   list: () => ({ op: 'list' }),
   stop: input => ({ op: 'stop', name: input.name }),
 }
@@ -107,8 +108,7 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'crew' }, async $ => {
-    await setView($, {})
-    await showPane($)
+    await openPane($)
     return { text: 'Crew pane opened.' }
   })
 

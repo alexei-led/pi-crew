@@ -34,15 +34,20 @@ export const ASK_LIMIT = 4000;
 export const FEED_LINES = 1000;
 /** Feed lines a bridge sends the mod at start. */
 export const FEED_REPLAY = 200;
-/**
- * Messages kept per worker. Each one is also a turn in the lead's transcript, which holds the full history;
- * the pane shows only the latest few.
- */
-export const FEED_PER_WORKER = 10;
+/** Default retained messages per worker run; history pages read the full retained feed, not the UI replay slice. */
+export const FEED_PER_WORKER = 50;
 /** A stopped worker stays listed this long, so its last report can be read; then it and its messages go. */
 export const GONE_TTL_MS = 30 * 60_000;
 /** Messages older than this are dropped: the feed is for current work, not history. */
 export const FEED_TTL_MS = 24 * 3_600_000;
+/** Default retained messages per worker run. */
+export const DEFAULT_HISTORY_LIMIT = FEED_PER_WORKER;
+export function historyLimit(env: Env = process.env): number {
+  const raw = env.PI_CREW_HISTORY_LIMIT?.trim();
+  if (!raw || !/^\d+$/.test(raw)) return DEFAULT_HISTORY_LIMIT;
+  const limit = Number(raw);
+  return Number.isInteger(limit) && limit >= 1 && limit <= 500 ? limit : DEFAULT_HISTORY_LIMIT;
+}
 /** A working worker idle this long with no message wakes the lead. `PI_CREW_IDLE_MIN=0` turns the alert off. */
 export const DEFAULT_IDLE_MIN = 10;
 export const idleMs = (env: Env = process.env) => {
@@ -51,7 +56,7 @@ export const idleMs = (env: Env = process.env) => {
   return Number.isFinite(min) && min > 0 ? min * 60_000 : 0;
 };
 
-const OPS = ["list", "send", "spawn", "stop", "read", "focus", "ack"] as const;
+const OPS = ["list", "send", "history", "spawn", "stop", "read", "focus", "ack"] as const;
 
 /** Checks a decoded control-socket request field by field, so a bad one fails here with a clear message. */
 export function parseRequest(raw: unknown): Request {
@@ -72,7 +77,25 @@ export function parseRequest(raw: unknown): Request {
       return { op };
     case "send": {
       const replyTo = optStr("replyTo");
-      return { op, to: str("to"), text: str("text"), ...(replyTo !== undefined ? { replyTo } : {}) };
+      const task = optStr("task");
+      return {
+        op, to: str("to"), text: str("text"),
+        ...(replyTo !== undefined ? { replyTo } : {}), ...(task !== undefined ? { task } : {}),
+      };
+    }
+    case "history": {
+      const name = str("name");
+      const runId = optStr("runId");
+      const before = optStr("before");
+      const rawLimit = raw.limit;
+      if (rawLimit !== undefined && (typeof rawLimit !== "number" || !Number.isInteger(rawLimit) || rawLimit < 1 || rawLimit > 50)) {
+        throw new Error('history: "limit" must be an integer from 1 to 50');
+      }
+      return {
+        op, name,
+        ...(runId !== undefined ? { runId } : {}), ...(before !== undefined ? { before } : {}),
+        ...(rawLimit !== undefined ? { limit: rawLimit } : {}),
+      };
     }
     case "spawn": {
       const [model, task, group, allowDefaultBranch] = [optStr("model"), optStr("task"), optStr("group"), optBool("allowDefaultBranch")];
@@ -284,12 +307,17 @@ const hasIdentity = (w: unknown): w is Identified =>
 export function upgrade(list: unknown[], now = Date.now()): Worker[] {
   const valid = list.filter(hasIdentity);
   let n = Math.max(0, ...valid.map(w => w.n || 0));
-  return valid.map(w => ({ state: "work", unread: 0, startedAt: now, lastAt: now, ...w, n: w.n || ++n }));
+  return valid.map(w => {
+    const worker: Worker = { state: "work", unread: 0, startedAt: now, lastAt: now, ...w, n: w.n || ++n };
+    if (typeof worker.runId !== "string" || !worker.runId) delete worker.runId;
+    if (!isRecord(worker.task) || typeof worker.task.text !== "string" || !Number.isFinite(worker.task.at)) delete worker.task;
+    return worker;
+  });
 }
 
 /**
- * What to keep: stopped workers younger than `goneMs`, and each listed worker's newest `perWorker` messages younger
- * than `feedMs`. Messages from sessions the lead did not spawn share one `perWorker` budget.
+ * What to keep: stopped workers younger than `goneMs`, and each listed worker run's newest `perWorker` messages younger
+ * than `feedMs`. Legacy messages without a run id have their own budget; unspawned sessions share one budget.
  */
 export function prune(
   workers: Worker[], feed: Msg[], now: number,
@@ -301,7 +329,7 @@ export function prune(
   const recent: Msg[] = [];
   for (const m of [...feed].reverse()) {
     if (now - m.at >= feedMs || (m.worker && !names.has(m.worker))) continue;
-    const key = m.worker ?? "";
+    const key = JSON.stringify([m.worker ?? "", m.worker ? m.runId ?? "" : ""]);
     const n = left.get(key) ?? perWorker;
     if (n <= 0) continue;
     left.set(key, n - 1);

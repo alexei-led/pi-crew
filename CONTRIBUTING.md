@@ -40,8 +40,15 @@ Use a regression test at the affected boundary. Unit and integration tests can e
 Do not remove one solely because another mentions the same behavior.
 
 For a manual check, spawn a worker in a disposable worktree.
-Exercise a question, progress, DONE, a plugin reload, and stop.
+Exercise a question, progress, DONE, history paging, a plugin reload, and stop through the lead.
+Check that browsing does not change manager unread/inbox state. New reports must not move a pinned history view.
+Verify inline and docked placement, explicit assignments, and separation after respawning a worker name.
 Automated tests do not launch a real Pi worker or inspect a live agterm/Claude Code screen.
+
+The 0.6.0 manual check used Claude Code 2.1.323, Pi 1.5.2, and agterm 0.41.1 in a disposable git repository.
+It covered a real question/answer, progress and DONE, and both pane placements.
+It also checked pinned history, observer side effects, assignment persistence, legacy sender labels, and respawned-run isolation.
+These are tested versions, not minimum version requirements.
 
 ## Scope
 

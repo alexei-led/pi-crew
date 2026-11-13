@@ -3,7 +3,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface as Engine, PromptSubmitInput, PromptSubmitResult } from 'claude-code'
 
 import type { BridgeEvent, CrewInbound, CrewMsg, CrewRequest, CrewView, CrewWorker } from '../types'
-import { progressText, startsTurn, tag, turnText } from './model'
+import { HISTORY_PAGE_SIZE, isHistory, mergeMessages, observeMessage, progressText, startsTurn, turnText } from './model'
 
 export const PLUGIN = 'pi-crew'
 export const PANE = 'pi-crew'
@@ -23,8 +23,8 @@ const TICK_MS = 60_000
 // The plugin name is a literal here, not PLUGIN: the engine's state scan accepts only literal plugin and key.
 const workers = atom({ plugin: 'pi-crew', key: 'workers' } as const, [] as CrewWorker[], { shape: 'workers-1' })
 const feed = atom({ plugin: 'pi-crew', key: 'feed' } as const, [] as CrewMsg[], { shape: 'feed-1' })
-const START: CrewView = { tab: 'inbox', filter: 'all', showAll: false, questionExpanded: false, collapsed: [] }
-const view = atom({ plugin: 'pi-crew', key: 'view' } as const, START, { shape: 'view-3' })
+const START: CrewView = { collapsed: [], expanded: [], following: true, newer: [], request: 0 }
+const view = atom({ plugin: 'pi-crew', key: 'view' } as const, START, { shape: 'view-4' })
 const tick = atom({ plugin: 'pi-crew', key: 'tick' } as const, 0, { shape: 'tick-1' })
 const seen = atom({ plugin: 'pi-crew', key: 'seen' } as const, [] as string[], { shape: 'seen-1' })
 const held = atom({ plugin: 'pi-crew', key: 'held' } as const, [] as CrewInbound[], { shape: 'held-1' })
@@ -35,8 +35,6 @@ let bridgeBin = ''
 let attempt = 0
 // Worker reports become turns one at a time, in arrival order.
 let submitting: Promise<void> = Promise.resolve()
-// What the user wrote to a worker from the pane since its last report: the next turn tells the model.
-export const panelNotes = new Map<string, string[]>()
 
 /** True once session.start has claimed this session as a lead. */
 export const connected = () => bridgeKey !== ''
@@ -113,15 +111,14 @@ async function deliver($: Engine, ev: CrewInbound) {
   const peer = name ?? ev.from.name ?? ev.from.id
   for (let n = 0; n < SUBMIT_ATTEMPTS; n++) {
     // The turn about a worker carries the progress it sent while the lead was not looking.
-    const earlier = name ? await claim($, m => m.from.worker === name) : []
+    const earlier = name ? await claim($, m => m.from.worker === name && m.runId === ev.runId) : []
     let drop: string | undefined = 'failed'
     try {
-      drop = (await $.prompt.submit({ text: turnText(worker, ev, name ? panelNotes.get(name) : undefined, earlier) })).drop
+      drop = (await $.prompt.submit({ text: turnText(worker, ev, earlier) })).drop
     } finally {
       if (drop) await restore($, earlier)
     }
     if (!drop) {
-      if (name) panelNotes.delete(name)
       await taken($, [...earlier, ev])
       return
     }
@@ -156,16 +153,21 @@ async function onEvent($: Engine, ev: BridgeEvent) {
       attempt = 0
       await update($, workers, () => ev.workers)
       await update($, feed, () => ev.feed.slice(-FEED_LIMIT))
+      const selected = await read($, view)
+      if (selected.sel) void loadHistory($).catch(error => $.ui.log(String(error), { to: 'debug' }))
       $.ui.status(undefined)
       return
     case 'workers':
       await update($, workers, () => ev.workers)
       return
     case 'feed':
-      await update($, feed, list => (list.some(m => m.id === ev.msg.id) ? list : [...list, ev.msg].slice(-FEED_LIMIT)))
+      await update($, feed, list => [...list.filter(m => m.id !== ev.msg.id), ev.msg].slice(-FEED_LIMIT))
+      await update($, view, v => observeMessage(v, ev.msg))
+      if ((await read($, view)).sel && (await read($, view)).following) await $.ui.scroll({ in: PANE, to: 'end' })
       return
     case 'feedset':
       await update($, feed, () => ev.feed.slice(-FEED_LIMIT))
+      await update($, view, v => !v.following || !v.history ? v : { ...v, history: { ...v.history, messages: v.history.messages.map(m => ev.feed.find(f => f.id === m.id) ?? m) } })
       return
     case 'roster':
       return
@@ -243,7 +245,7 @@ export async function act($: Engine, request: CrewRequest, what: string): Promis
 
 // The engine follows `$` only into imported function declarations, so these are not arrow consts.
 export function setView($: Engine, patch: Partial<CrewView>) {
-  return update($, view, v => ({ ...v, confirmStop: undefined, ...patch }))
+  return update($, view, v => ({ ...v, ...patch }))
 }
 
 export function toggleGroup($: Engine, name: string) {
@@ -254,27 +256,58 @@ export function showPane($: Engine) {
   return $.ui.open({ id: PANE, title: TITLE, focus: true, closeOnEscape: true })
 }
 
-export async function closePane($: Engine) {
-  await setView($, {})
-  await $.ui.close({ id: PANE })
-}
-
+/** Browsing is independent of manager delivery: no read marker or ack is sent here. */
 export async function openThread($: Engine, w: CrewWorker) {
-  await setView($, { sel: w.name, showAll: false, questionExpanded: false })
-  if (w.unread > 0 && bridgeKey) await call($, { op: 'read', name: w.name })
+  await setView($, { sel: w.name, runId: w.runId, history: undefined, loading: false, arriving: [], error: undefined, expanded: [], following: true, newer: [] })
+  await loadHistory($)
 }
 
-export async function openPane($: Engine, patch: Partial<CrewView>, w?: CrewWorker) {
-  await setView($, { sel: undefined, ...patch })
+export async function openPane($: Engine, w?: CrewWorker) {
+  await setView($, { sel: undefined, history: undefined, loading: false, arriving: [], error: undefined, newer: [], expanded: [], following: true })
   if (w) await openThread($, w)
   await showPane($)
+  if (w) await $.ui.scroll({ in: PANE, to: 'end' })
 }
 
-export async function reply($: Engine, w: CrewWorker, text: string) {
-  await setView($, {})
-  const t = text.trim()
-  if (!t) return
-  if (await act($, { op: 'send', to: w.name, text: t, replyTo: w.ask?.id }, `send to ${tag(w)}`)) {
-    panelNotes.set(w.name, [...(panelNotes.get(w.name) ?? []), t])
+/** The request counter discards replies for an older navigation or an overtaken query. */
+export async function loadHistory($: Engine, older = false) {
+  let current!: CrewView
+  await update($, view, v => {
+    current = { ...v, request: v.request + 1, error: undefined, following: !older, loading: true, arriving: [] }
+    return current
+  })
+  if (!current.sel) return
+  try {
+    if (!connected()) throw new Error('bridge not connected; run /reload-plugins')
+    const before = older ? current.history?.messages[0]?.id : undefined
+    const answer = await call($, { op: 'history', name: current.sel, runId: current.runId, before, limit: HISTORY_PAGE_SIZE })
+    if (!answer.ok) throw new Error(answer.error ?? 'history unavailable')
+    const page: unknown = JSON.parse(answer.raw)
+    if (!isHistory(page) || page.name !== current.sel || page.runId !== current.runId) throw new Error('invalid history response')
+    let accepted = false
+    await update($, view, v => {
+      if (v.request !== current.request || v.sel !== current.sel || v.runId !== current.runId) return v
+      accepted = true
+      const messages = older && v.history ? mergeMessages(page.messages, v.history.messages) : mergeMessages(page.messages, v.arriving ?? [])
+      return {
+        ...v, loading: false, arriving: [],
+        history: { ...page, messages: older ? messages : messages.slice(-HISTORY_PAGE_SIZE), hasOlder: page.hasOlder || (!older && messages.length > HISTORY_PAGE_SIZE) },
+        newer: older ? v.newer : [], error: undefined,
+      }
+    })
+    if (accepted) await $.ui.scroll({ in: PANE, to: older ? 'start' : 'end' })
+  } catch (error) {
+    await update($, view, v => v.request !== current.request || v.sel !== current.sel || v.runId !== current.runId ? v : { ...v, error: String(error), following: false, loading: false, arriving: [] })
   }
+}
+
+export function expandMessage($: Engine, id: string) {
+  return update($, view, v => ({
+    ...v, following: false,
+    expanded: v.expanded.includes(id) ? v.expanded.filter(i => i !== id) : [...v.expanded, id],
+  }))
+}
+
+export function pauseHistory($: Engine) {
+  return setView($, { following: false })
 }

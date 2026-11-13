@@ -1,6 +1,6 @@
 // Pure view logic shared by the band, the pane and the turn text: one vocabulary of glyphs, numbers and names.
-// Glyphs, words and tones follow the screen contract shared with crew-net (docs/guide.md, "With crew-net"); a test pins them.
-import type { CrewFilter, CrewInbound, CrewMsg, CrewState, CrewTab, CrewWorker } from '../types'
+// Glyphs and tones follow the screen contract shared with crew-net (docs/guide.md, "With crew-net"); a test pins them.
+import type { CrewHistory, CrewInbound, CrewMsg, CrewState, CrewView, CrewWorker } from '../types'
 
 export const GLYPH: Record<CrewState, string> = { ask: '◆', work: '●', idle: '○', gone: '✕' }
 /** Theme keys, so both plugins draw one shade; `dim` is dimmed text of no color. */
@@ -8,10 +8,10 @@ export type Tone = 'warning' | 'success' | 'dim'
 export const TONE: Record<CrewState, Tone> = { ask: 'warning', work: 'success', idle: 'dim', gone: 'dim' }
 /** The Text props that draw a tone; no tone is normal text. */
 export const toneProps = (tone: Tone | undefined) => (tone === 'dim' ? { dimColor: true } : { color: tone })
-export const UNREAD = '✉'
 /** The bridge's alert that a working worker went quiet: not a worker state, so not in GLYPH. */
 export const IDLE_GLYPH = '◇'
-export const LABEL: Record<CrewState, string> = { ask: 'needs you', work: 'working', idle: 'idle', gone: 'stopped' }
+export const HISTORY_PAGE_SIZE = 10
+export const LABEL: Record<CrewState, string> = { ask: 'waiting on lead', work: 'on task', idle: 'idle', gone: 'stopped' }
 
 /** "3 api": the number and name every surface shows for a worker. */
 export const tag = (w: Pick<CrewWorker, 'n' | 'name'>) => `${w.n} ${w.name}`
@@ -32,33 +32,16 @@ export function clip(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text
 }
 
-export type Tally = { crew: number; ask: number; work: number; idle: number; gone: number; unread: number }
+export type Tally = { crew: number; ask: number; work: number; idle: number; gone: number }
 
 export function tally(ws: CrewWorker[]): Tally {
-  const t: Tally = { crew: 0, ask: 0, work: 0, idle: 0, gone: 0, unread: 0 }
+  const t: Tally = { crew: 0, ask: 0, work: 0, idle: 0, gone: 0 }
   for (const w of ws) {
     t[w.state]++
     if (w.state !== 'gone') t.crew++
-    t.unread += w.unread
   }
   return t
 }
-
-export const matches = (w: CrewWorker, filter: CrewFilter) => filter === 'all' || w.state === filter
-
-/** Who to look at first: open questions (oldest first), then unread, then the rest by latest activity; stopped last. */
-export function inboxOrder(ws: CrewWorker[]): CrewWorker[] {
-  const rank = (w: CrewWorker) => (w.state === 'gone' ? 3 : w.state === 'ask' ? 0 : w.unread > 0 ? 1 : 2)
-  return [...ws].sort((a, b) => {
-    const r = rank(a) - rank(b)
-    if (r) return r
-    if (a.state === 'ask' && b.state === 'ask') return (a.ask?.at ?? a.lastAt) - (b.ask?.at ?? b.lastAt)
-    return b.lastAt - a.lastAt || a.n - b.n
-  })
-}
-
-/** The open question to answer next: the oldest. */
-export const nextQuestion = (ws: CrewWorker[]) => inboxOrder(ws).find(w => w.state === 'ask' && w.ask)
 
 export const UNGROUPED = 'crew'
 
@@ -70,14 +53,6 @@ export function groups(ws: CrewWorker[]): Array<{ name: string; workers: CrewWor
     by.set(g, [...(by.get(g) ?? []), w])
   }
   return [...by].map(([name, workers]) => ({ name, workers }))
-}
-
-export const threadOf = (feed: CrewMsg[], name: string) => feed.filter(m => m.worker === name)
-
-/** The newest `limit` items, and how many older ones were left out. */
-export function fold<T>(items: T[], limit: number): { hidden: number; shown: T[] } {
-  if (items.length <= limit) return { hidden: 0, shown: items }
-  return { hidden: items.length - limit, shown: items.slice(-limit) }
 }
 
 /** At most `lines` lines of `width` columns; `more` when anything was cut. */
@@ -131,18 +106,19 @@ export function framed(sender: string, text: string): string {
  * Human-readable turn: the headline stays searchable independently of transport metadata. `earlier` is the worker's
  * progress that waited for this turn.
  */
-export function turnText(worker: CrewWorker | undefined, ev: CrewInbound, notes?: string[], earlier: CrewInbound[] = []): string {
+export function turnText(worker: CrewWorker | undefined, ev: CrewInbound, earlier: CrewInbound[] = []): string {
   // A session picks its own name and cwd: kept to one line, they cannot write lines of their own outside the fence.
   const peer = oneLine(ev.from.worker ?? ev.from.name ?? ev.from.id)
-  const sender = worker ? `worker ${tag(worker)}` : `intercom session "${peer}"`
+  const stale = worker && ev.runId !== worker.runId
+  const sender = stale ? `previous run of worker ${peer}` : worker ? `worker ${tag(worker)}` : `intercom session "${peer}"`
   const checks = checksLine(ev.kind === 'done' ? ev.checks : undefined)
   return [
-    turnHead(worker, ev.kind, peer),
-    ...(ev.kind === 'ask' ? [`Answer with mcp__pi-crew__send to "${peer}" replyTo "${ev.id}".`] : []),
-    ...(ev.kind === 'idle' ? [`Check it: its screen below, mcp__pi-crew__send to nudge "${peer}", or mcp__pi-crew__stop.`] : []),
+    stale ? 'Report from previous run of worker ' + peer : turnHead(worker, ev.kind, peer),
+    ...(stale ? ['Do not treat this as a report from the current worker run.'] : []),
+    ...(!stale && ev.kind === 'ask' ? [`Answer with mcp__pi-crew__send to "${peer}" replyTo "${ev.id}".`] : []),
+    ...(!stale && ev.kind === 'idle' ? [`Check it: its screen below, mcp__pi-crew__send to nudge "${peer}", or mcp__pi-crew__stop.`] : []),
     oneLine(`intercom id ${ev.from.id}, cwd ${ev.from.cwd}, message ${ev.id}${ev.replyTo ? `, in reply to ${ev.replyTo}` : ''}`),
     ...(checks ? [checks] : []),
-    ...(notes?.length ? [`Since its last report the user wrote to ${peer} from the crew pane: ${notes.map(n => `"${n}"`).join(', ')}`] : []),
     '',
     framed(ev.kind === 'idle' ? `the pi-crew bridge, about ${sender}` : sender, ev.text),
     ...(earlier.length ? ['', 'Progress it sent before this, oldest first:', ...earlier.map(p => framed(sender, p.text))] : []),
@@ -154,82 +130,62 @@ export function progressText(reports: string[]): string {
   return ['pi-crew: reports your workers sent since the last turn. None was marked Q: or DONE:, so none started a turn.', ...reports].join('\n\n')
 }
 
-/** Fit the identity before the preview, sacrificing the name before question text. */
-export function bandQuestion(w: CrewWorker, count: number, now: number, width: number): string {
-  if (!w.ask || width <= 0) return ''
-  const fullPrefix = count > 1 ? `${GLYPH.ask} ${count} asks · ` : `${GLYPH.ask} `
-  const compactPrefix = count > 1 ? `${GLYPH.ask}${count} · ` : `${GLYPH.ask} `
-  const suffix = ` ${age(w.ask.at, now)}: ${oneLine(w.ask.text)}`
-  const prefix = fullPrefix.length + String(w.n).length + 2 + ` ${age(w.ask.at, now)}: `.length + 1 <= width ? fullPrefix : compactPrefix
-  const identity = `${prefix}${w.n}`
-  if (identity.length > width) return clip(count > 1 ? `${GLYPH.ask}${count}` : `${GLYPH.ask}${w.n}`, width)
-  const nameWidth = Math.max(1, Math.min(w.name.length, width - identity.length - 1 - suffix.length))
-  const name = clip(w.name, nameWidth)
-  const label = `${identity}${name ? ` ${name}` : ''}${suffix}`
-  if (label.length <= width) return label
-  // If even the age and preview cannot fit, retain as much worker identity as possible.
-  if (identity.length + ` ${age(w.ask.at, now)}: `.length + 1 > width) {
-    // Never let the name clip eat the worker number the band reserved room for.
-    return width < identity.length + 2 ? identity : clip(`${identity} ${w.name}`, width)
+export function messageSender(name: string, m: CrewMsg): string {
+  return m.kind === 'out' ? m.sender === 'lead' ? 'Lead → ' + name : 'To ' + name : name + ' → Lead'
+}
+
+export function workerSummary(w: CrewWorker, feed: CrewMsg[]): { label: string; evidence?: string } {
+  const done = feed.findLast(m => m.worker === w.name && m.runId === w.runId && m.kind === 'done')
+  if (w.state !== 'idle' || !done) return { label: LABEL[w.state] }
+  return { label: 'DONE reported', evidence: done.checks ? 'git checks ' + (done.checks.ok ? 'passed' : 'failed') : 'git checks not recorded' }
+}
+
+export function observerBand(ws: CrewWorker[], cols: number): string {
+  const t = tally(ws)
+  const parts = ['crew ' + t.crew]
+  for (const [count, full, compact] of [
+    [t.ask, '◆ ' + t.ask + ' waiting on lead', '◆' + t.ask],
+    [t.work, '● ' + t.work + ' on task', '●' + t.work],
+    [t.idle, '○ ' + t.idle + ' idle', '○' + t.idle],
+    [t.gone, '✕ ' + t.gone + ' stopped', '✕' + t.gone],
+  ] as const) {
+    if (!count) continue
+    const room = cols - parts.join(' · ').length - 3
+    if (full.length <= room) parts.push(full)
+    else if (compact.length <= room) parts.push(compact)
   }
-  return clip(label, width)
+  return clip(parts.join(' · '), cols)
 }
 
-export type BandChip = {
-  key: 'unread' | 'work' | 'idle' | 'gone'
-  label: string
-  /** Only the unread chip has a hotkey. */
-  hotkey?: string
-  tab: CrewTab
-  filter: CrewFilter
+const record = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
+export function isHistory(v: unknown): v is CrewHistory {
+  return record(v) && typeof v.name === 'string' && (v.runId === undefined || typeof v.runId === 'string') &&
+    typeof v.hasOlder === 'boolean' && Array.isArray(v.messages) && v.messages.every(m =>
+      record(m) && typeof m.id === 'string' && typeof m.text === 'string' && typeof m.at === 'number' &&
+      ['ask', 'done', 'report', 'out'].includes(String(m.kind)) && typeof m.peer === 'string' &&
+      (m.sender === undefined || m.sender === 'lead' || m.sender === 'worker') &&
+      (m.runId === undefined || typeof m.runId === 'string') &&
+      (m.checks === undefined || (record(m.checks) && typeof m.checks.ok === 'boolean' && typeof m.checks.at === 'number' &&
+        Array.isArray(m.checks.notes) && m.checks.notes.every(n => typeof n === 'string'))))
 }
 
-export type BandLayout = {
-  crew: { label: string; hotkey?: string }
-  separator: string
-  /** Empty when there is no open question or no room for even its worker number. */
-  question: string
-  chips: BandChip[]
-}
-
-/**
- * The band's width budget over `cols` columns: crew first, then the oldest question (which secondary chips cannot
- * shorten), then the nonzero state chips in full or compact form. Budgets use UTF-16 length, not terminal cells;
- * wide CJK/emoji can still misfit.
- */
-export function bandLayout(t: Tally, q: CrewWorker | undefined, now: number, cols: number): BandLayout {
-  const crewHotkey = cols >= 3 ? 'c' : undefined
-  const crewLabel = clip(`crew ${t.crew}`, Math.max(0, cols - (crewHotkey ? 3 : 0)))
-  const crewWidth = crewLabel.length + (crewHotkey ? 3 : 0)
-  const separator = cols >= crewWidth + 3 + 3 + (q ? String(q.n).length + 2 : 0) ? ' · ' : ' '
-  const questionOverhead = q ? separator.length + 3 : 0
-  const questionFloor = q ? `${t.ask > 1 ? `${GLYPH.ask}${t.ask} · ` : `${GLYPH.ask} `}${q.n}` : ''
-  const questionFull = q ? bandQuestion(q, t.ask, now, Number.MAX_SAFE_INTEGER) : ''
-  let remaining = Math.max(0, cols - crewWidth - questionOverhead)
-  const candidates = [
-    { key: 'unread', count: t.unread, glyph: UNREAD, word: 'new', hotkey: 'u', tab: 'inbox', filter: 'all' },
-    { key: 'work', count: t.work, glyph: GLYPH.work, word: LABEL.work, tab: 'crew', filter: 'work' },
-    { key: 'idle', count: t.idle, glyph: GLYPH.idle, word: LABEL.idle, tab: 'crew', filter: 'idle' },
-    { key: 'gone', count: t.gone, glyph: GLYPH.gone, word: LABEL.gone, tab: 'crew', filter: 'gone' },
-  ] as const
-  const chips = candidates
-    .filter(c => c.count > 0)
-    .flatMap((c): BandChip[] => {
-      // Protect question identity and unread first; secondary counts cannot shorten the question.
-      const reserve = q ? (c.key === 'unread' ? questionFloor.length : questionFull.length) : 0
-      const hotkey = 'hotkey' in c ? c.hotkey : undefined
-      const overhead = separator.length + (hotkey ? 3 : 0)
-      const full = `${c.glyph} ${c.count} ${c.word}`
-      const compact = `${c.glyph}${c.count}`
-      const label = [full, compact].find(text => text.length + overhead + reserve <= remaining)
-      if (!label) return []
-      remaining -= label.length + overhead
-      return [{ key: c.key, label, hotkey, tab: c.tab, filter: c.filter }]
-    })
-  return {
-    crew: { label: crewLabel, hotkey: crewHotkey },
-    separator,
-    question: q ? bandQuestion(q, t.ask, now, remaining) : '',
-    chips,
+/** A pinned thread is a stable snapshot; only observer-local newer ids change. */
+export function mergeMessages(left: CrewMsg[], right: CrewMsg[]): CrewMsg[] {
+  const messages = new Map(left.map(m => [m.id, m]))
+  for (const m of right) {
+    const old = messages.get(m.id)
+    const checks = old?.checks && (!m.checks || old.checks.at > m.checks.at) ? old.checks : m.checks
+    messages.set(m.id, { ...m, ...(checks ? { checks } : {}) })
   }
+  return [...messages.values()]
+}
+
+export function observeMessage(v: CrewView, m: CrewMsg): CrewView {
+  if (!v.sel || m.worker !== v.sel || m.runId !== v.runId) return v
+  if (v.loading) v = { ...v, arriving: [...(v.arriving ?? []).filter(p => p.id !== m.id), m].slice(-HISTORY_PAGE_SIZE) }
+  if (!v.history) return v
+  const existing = v.history.messages.some(p => p.id === m.id)
+  if (!v.following) return existing ? v : { ...v, newer: [...new Set([...v.newer, m.id])].slice(-500) }
+  const messages = mergeMessages(v.history.messages, [m])
+  return { ...v, history: { ...v.history, messages: messages.slice(-HISTORY_PAGE_SIZE), hasOlder: v.history.hasOlder || messages.length > 10 } }
 }

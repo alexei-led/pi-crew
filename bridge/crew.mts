@@ -1,15 +1,16 @@
 // The crew: workers, the lead's inbox, open asks and the feed, and the handlers that change them. The broker client,
 // agtermctl, git, the clock and the event sink are injected (see CrewDeps), so a test drives it with fakes; state lives on
 // disk under `dir`, and the roster and exit-check delays use real timers. Importing this file has no side effects.
+import { randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 
 import {
-  DEFAULT_MODEL, FEED_REPLAY, GROUP_NAME, PREVIEW_LIMIT, WORKER_NAME, appendLine, applyIn, applyOut, classify, defaultBranch, errorMessage, idleDue,
+  DEFAULT_MODEL, FEED_PER_WORKER, FEED_REPLAY, FEED_TTL_MS, GROUP_NAME, PREVIEW_LIMIT, WORKER_NAME, appendLine, applyIn, applyOut, classify, defaultBranch, errorMessage, idleDue,
   isNoSuchSession, isRecord, launchScript, nextNumber, parseDone, parseRequest, parseSessionId, prune, quietSince, readJson, readLines, resolveTarget,
   setAside, stableId, trackLive, upgrade, verifyDone, workerBrief, writeJson, writeLines, type Git, type Live, type Msg, type SessionInfo, type Worker,
 } from "./lib.mts";
-import type { BridgeEvent, CrewInbound as Inbound, CrewRequest as Request } from "../types/index.d.ts";
+import type { BridgeEvent, CrewHistory, CrewInbound as Inbound, CrewRequest as Request } from "../types/index.d.ts";
 
 /** The broker forgets an intercom ask after its own timeout (10 min by default); a day bounds our copy. */
 const ASK_KEEP_MS = 86_400_000;
@@ -54,6 +55,8 @@ export type CrewDeps = {
   exitCheckMs?: number;
   /** A working worker idle this long wakes the lead; 0 turns the alert off. */
   idleMs?: number;
+  /** Maximum retained feed messages per worker run; defaults to 50. */
+  historyLimit?: number;
 };
 
 /** "12m", "3h": how long ago, for list rows the model reads. */
@@ -146,7 +149,7 @@ export function createCrew(dir: string, deps: CrewDeps) {
   // each worker's latest few.
   const pruneNow = () => {
     const feed = readLines<Msg>(feedFile);
-    const kept = prune([...workers.values()], feed, now());
+    const kept = prune([...workers.values()], feed, now(), { perWorker: deps.historyLimit ?? FEED_PER_WORKER });
     if (kept.forgotten.length === 0 && kept.feed.length === feed.length) return;
     for (const name of kept.forgotten) workers.delete(name);
     writeLines(feedFile, kept.feed);
@@ -180,14 +183,31 @@ export function createCrew(dir: string, deps: CrewDeps) {
   // Held until `ready` is out, so the mod knows the crew before the first report.
   let start!: () => void;
   let announcing = new Promise<void>(resolve => (start = resolve));
+  const updateFeedChecks = (id: string, checks: NonNullable<Msg["checks"]>) => {
+    const feed = readLines<Msg>(feedFile);
+    const index = feed.findIndex(msg => msg.id === id);
+    if (index < 0) return;
+    feed[index] = { ...feed[index]!, checks };
+    writeLines(feedFile, feed);
+    emit({ type: "feedset", feed: feed.slice(-FEED_REPLAY) });
+  };
   const withChecks = async (event: Inbound): Promise<Inbound> => {
     const w = event.from.worker ? workers.get(event.from.worker) : undefined;
     if (!w || event.kind !== "done") return event;
-    const checked = { ...event, checks: await verifyDone(parseDone(classify(event.text).text), w.cwd, git, w.allowDefaultBranch) };
+    const feedMsg = readLines<Msg>(feedFile).find(msg => msg.id === event.id);
+    // A delayed/replayed DONE from a replaced worker must not be checked against the new run's checkout.
+    if ((event.runId ?? feedMsg?.runId) !== w.runId) {
+      const stale: Inbound = { ...event, checks: { ok: false, notes: ["previous worker run or missing run identity; checkout unchecked"] } };
+      if (inbox.has(event.id)) { inbox.set(event.id, stale); saveInbox(); }
+      return stale;
+    }
+    const result = await verifyDone(parseDone(classify(event.text).text), w.cwd, git, w.allowDefaultBranch);
+    const checked: Inbound = { ...event, checks: result };
     if (inbox.has(event.id)) {
       inbox.set(event.id, checked);
       saveInbox();
     }
+    if (feedMsg) updateFeedChecks(event.id, { ...result, at: now() });
     return checked;
   };
   const announce = (event: Inbound) => {
@@ -203,8 +223,10 @@ export function createCrew(dir: string, deps: CrewDeps) {
   const ingest = (from: Peer, message: Incoming) => {
     const worker = workerName(from.id);
     const { kind, text } = classify(message.content.text, message.expectsReply === true);
+    const w = worker ? workers.get(worker) : undefined;
     const event: Inbound = {
       type: "message",
+      ...(w?.runId ? { runId: w.runId } : {}),
       from: { id: from.id, name: from.name, cwd: from.cwd, worker },
       id: message.id,
       ...(message.replyTo ? { replyTo: message.replyTo } : {}),
@@ -220,10 +242,10 @@ export function createCrew(dir: string, deps: CrewDeps) {
     }
     const msg: Msg = {
       id: message.id, at: now(), kind, text, peer: worker ?? from.name ?? from.id,
-      ...(worker ? { worker } : {}), ...(message.replyTo ? { replyTo: message.replyTo } : {}),
+      ...(worker ? { worker, sender: "worker" } : {}), ...(w?.runId ? { runId: w.runId } : {}),
+      ...(message.replyTo ? { replyTo: message.replyTo } : {}),
     };
     record(msg);
-    const w = worker ? workers.get(worker) : undefined;
     if (w) {
       workers.set(w.name, applyIn(w, msg));
       saveWorkers();
@@ -286,6 +308,7 @@ export function createCrew(dir: string, deps: CrewDeps) {
       const where = l ? `idle on intercom for ${quiet}` : `not on intercom; no message for ${quiet}`;
       persist({
         type: "message",
+        ...(w.runId ? { runId: w.runId } : {}),
         from: { id: w.id, name: w.name, cwd: w.cwd, worker: w.name },
         id: `idle-${w.name}-${at}`,
         expectsReply: false,
@@ -338,16 +361,44 @@ export function createCrew(dir: string, deps: CrewDeps) {
       saveAsks();
     }
     if (!result.delivered) throw new Error(`not delivered to ${req.to}: ${result.reason ?? "unknown"}${result.code ? ` (${result.code})` : ""}`);
+    const at = now();
     const msg: Msg = {
-      id: result.id ?? `out-${now()}-${Math.random().toString(36).slice(2, 8)}`, at: now(), kind: "out",
-      text: req.text, peer: w?.name ?? req.to, ...(w ? { worker: w.name } : {}), ...(req.replyTo ? { replyTo: req.replyTo } : {}),
+      id: result.id ?? `out-${at}-${Math.random().toString(36).slice(2, 8)}`, at, kind: "out",
+      text: req.text, peer: w?.name ?? req.to, sender: "lead",
+      ...(w ? { worker: w.name } : {}), ...(w?.runId ? { runId: w.runId } : {}),
+      ...(req.replyTo ? { replyTo: req.replyTo } : {}),
     };
     record(msg);
-    if (w) {
-      workers.set(w.name, applyOut(w, msg));
+    const current = w ? workers.get(w.name) : undefined;
+    if (current && current.runId === w?.runId) {
+      const updated = applyOut(current, msg);
+      workers.set(current.name, req.task !== undefined ? { ...updated, task: { text: req.task, at } } : updated);
       saveWorkers();
     }
     return { ...result, to: target };
+  };
+
+  const history = (req: Extract<Request, { op: "history" }>): CrewHistory => {
+    const w = workers.get(req.name);
+    if (!w) throw new Error(`no worker named ${req.name}`);
+    if (req.runId !== undefined && req.runId !== w.runId) {
+      throw new Error(`worker ${req.name} run mismatch: requested ${req.runId}, current ${w.runId ?? "legacy"}`);
+    }
+    const at = now();
+    const messages = readLines<Msg>(feedFile)
+      .filter(msg => msg.worker === w.name && msg.runId === w.runId && at - msg.at < FEED_TTL_MS)
+      .sort((a, b) => a.at - b.at)
+      .slice(-(deps.historyLimit ?? FEED_PER_WORKER));
+    const limit = req.limit ?? 10;
+    const cursor = req.before === undefined ? messages.length : messages.findIndex(msg => msg.id === req.before);
+    if (cursor < 0) throw new Error(`history cursor ${JSON.stringify(req.before)} is not retained for worker ${req.name}'s current run`);
+    const start = Math.max(0, cursor - limit);
+    return {
+      name: w.name,
+      ...(w.runId ? { runId: w.runId } : {}),
+      messages: messages.slice(start, cursor),
+      hasOlder: start > 0,
+    };
   };
 
   const read = (req: Extract<Request, { op: "read" }>) => {
@@ -394,6 +445,7 @@ export function createCrew(dir: string, deps: CrewDeps) {
   const newWorker = (req: Spawn, at: number): Worker => ({
     name: req.name,
     id: stableId("pi-crew-worker", deps.key, req.name),
+    runId: randomUUID(),
     cwd: req.cwd,
     model: req.model || deps.defaultModel || DEFAULT_MODEL,
     ...(req.allowDefaultBranch ? { allowDefaultBranch: true } : {}),
@@ -403,8 +455,9 @@ export function createCrew(dir: string, deps: CrewDeps) {
     unread: 0,
     startedAt: at,
     lastAt: at,
+    ...(req.task ? { task: { text: req.task, at } } : {}),
     // The preview is cut a character short of the limit, like clip() without its ellipsis.
-    ...(req.task ? { last: { id: `task-${at}`, at, text: `you: ${req.task.slice(0, PREVIEW_LIMIT - 1)}` } } : {}),
+    ...(req.task ? { last: { id: `task-${at}-${req.name}`, at, text: `you: ${req.task.slice(0, PREVIEW_LIMIT - 1)}` } } : {}),
   });
 
   /** Writes the brief and the launcher the agterm session runs; returns the launcher's path. */
@@ -450,7 +503,10 @@ export function createCrew(dir: string, deps: CrewDeps) {
       // Recorded before agterm runs, so its id resolves for sends even while the session starts.
       workers.set(worker.name, worker);
       saveWorkers();
-      if (req.task) record({ id: `task-${at}-${worker.name}`, at, kind: "out", text: req.task, peer: worker.name, worker: worker.name });
+      if (req.task) record({
+        id: `task-${at}-${worker.name}-${worker.runId}`, at, kind: "out", text: req.task, peer: worker.name,
+        worker: worker.name, runId: worker.runId, sender: "lead",
+      });
       const { session, failure } = await openSession(worker, parent, launch);
       // A report may have updated the record while agterm ran: merge into the current one.
       const current = workers.get(worker.name) ?? worker;
@@ -496,6 +552,7 @@ export function createCrew(dir: string, deps: CrewDeps) {
       case "list": return list();
       case "ack": return ack(req);
       case "send": return send(req);
+      case "history": return history(req);
       case "read": return read(req);
       case "focus": return focus(req);
       case "spawn": return spawn(req);

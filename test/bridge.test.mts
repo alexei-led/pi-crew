@@ -119,14 +119,24 @@ test("bridge round trip: start broker, spawn, both directions, replay until ack,
   bridge = new Bridge();
   const ready = await bridge.next(e => e.type === "ready");
   assert.equal(ready.lead.id, leadId);
+  let runId = "";
 
   await t.test("spawn writes brief and launcher and records the agterm session", async () => {
-    const { code, body } = await call({ op: "spawn", name: "api", cwd: tmp, task: "say hi", group: "backend" });
+    const { code, body } = await call({
+      op: "spawn",
+      name: "api",
+      cwd: tmp,
+      task: "say hi",
+      group: "backend",
+    });
     assert.equal(code, 0, JSON.stringify(body));
     assert.equal(body.worker.id, workerId);
     assert.equal(body.worker.agtermSession, "agterm-worker-1");
+    assert.equal(typeof body.worker.runId, "string");
+    runId = body.worker.runId;
+    assert.deepEqual(body.worker.task, { text: "say hi", at: body.worker.startedAt });
     assert.deepEqual([body.worker.n, body.worker.group, body.worker.state], [1, "backend", "work"]);
-    await bridge!.next(e => e.type === "feed" && e.msg.kind === "out" && e.msg.text === "say hi");
+    await bridge!.next((e) => e.type === "feed" && e.msg.kind === "out" && e.msg.text === "say hi");
     assert.equal((await call({ op: "spawn", name: "web", cwd: tmp, group: "Bad Group" })).code, 1);
     const wdir = join(env.PI_CREW_DIR, KEY, "workers/api");
     assert.match(readFileSync(join(wdir, "brief.md"), "utf8"), new RegExp(leadId));
@@ -138,11 +148,17 @@ test("bridge round trip: start broker, spawn, both directions, replay until ack,
 
   const worker = await workerClient();
 
-  await t.test("lead → worker by name; failed delivery is an error", async () => {
-    const { code, body } = await call({ op: "send", to: "api", text: "task 2" });
+  await t.test("lead → worker by name; only an explicit new task updates task state", async () => {
+    const { code, body } = await call({ op: "send", to: "api", text: "ordinary reply" });
     assert.equal(code, 0, JSON.stringify(body));
-    for (let i = 0; i < 50 && worker.inbox.length === 0; i++) await new Promise(r => setTimeout(r, 100));
-    assert.equal(worker.inbox[0]?.content.text, "task 2");
+    for (let i = 0; i < 50 && worker.inbox.length === 0; i++)
+      await new Promise((r) => setTimeout(r, 100));
+    assert.equal(worker.inbox[0]?.content.text, "ordinary reply");
+    const file = join(env.PI_CREW_DIR, KEY, "workers.json");
+    assert.equal(JSON.parse(readFileSync(file, "utf8"))[0].task.text, "say hi");
+    const next = await call({ op: "send", to: "api", text: "start task 2", task: "task 2" });
+    assert.equal(next.code, 0, JSON.stringify(next.body));
+    assert.equal(JSON.parse(readFileSync(file, "utf8"))[0].task.text, "task 2");
     const bad = await call({ op: "send", to: "00000000-0000-4000-8000-000000000000", text: "x" });
     assert.equal(bad.code, 1);
     assert.equal(bad.body.ok, false);
@@ -153,13 +169,26 @@ test("bridge round trip: start broker, spawn, both directions, replay until ack,
     const sent = await worker.client.send(leadId, { text: "done: hi" });
     assert.equal(sent.delivered, true);
     reportId = sent.id;
-    const ev = await bridge!.next(e => e.type === "message" && e.id === reportId);
+    const ev = await bridge!.next((e) => e.type === "message" && e.id === reportId);
     assert.equal(ev.from.worker, "api");
     assert.equal(ev.text, "done: hi");
     assert.equal(ev.kind, "done");
-    const feed = await bridge!.next(e => e.type === "feed" && e.msg.id === reportId);
-    assert.deepEqual([feed.msg.kind, feed.msg.text, feed.msg.worker], ["done", "hi", "api"]);
-    const w = await bridge!.next(e => e.type === "workers" && e.workers[0].unread === 1);
+    const feed = await bridge!.next((e) => e.type === "feed" && e.msg.id === reportId);
+    assert.deepEqual(
+      [feed.msg.kind, feed.msg.text, feed.msg.worker, feed.msg.sender, feed.msg.runId],
+      ["done", "hi", "api", "worker", runId],
+    );
+    const checked = await bridge!.next(
+      (e) => e.type === "feedset" && e.feed.some((m: any) => m.id === reportId && m.checks?.at),
+    );
+    const checkedMsg = checked.feed.find((m: any) => m.id === reportId);
+    assert.deepEqual([checkedMsg.sender, checkedMsg.runId], ["worker", runId]);
+    assert.equal(typeof checkedMsg.checks.at, "number");
+    const history = await call({ op: "history", name: "api", limit: 10 });
+    assert.equal(history.code, 0, JSON.stringify(history.body));
+    assert.ok(history.body.messages.some((m: any) => m.id === reportId && m.checks?.at));
+    assert.equal(history.body.runId, runId);
+    const w = await bridge!.next((e) => e.type === "workers" && e.workers[0].unread === 1);
     assert.equal(w.workers[0].state, "idle");
   });
 
@@ -188,6 +217,7 @@ test("bridge round trip: start broker, spawn, both directions, replay until ack,
     const ready = await bridge.next(e => e.type === "ready");
     assert.ok(ready.feed.some((m: any) => m.id === reportId), "ready replays the feed");
     assert.equal(ready.workers[0].n, 1);
+    assert.equal(ready.workers[0].runId, runId);
     await bridge.next(e => e.type === "message" && e.id === reportId);
     assert.equal((await call({ op: "ack", id: reportId })).code, 0);
     await bridge.stop();
@@ -323,7 +353,8 @@ test("lead feedback: default-branch guard, DONE checks, idle alerts, send by ses
     const onmain = await workerClient(stableId("pi-crew-worker", key, "onmain"), "onmain", "thinking");
     const head = await g(main, "rev-parse", "HEAD");
     const report = await onmain.client.send(lead2, { text: `DONE: inspected\nhead: ${head}\nbranch: main\ntests: none\nrc: 0\nlogs: none` });
-    assert.deepEqual((await b.next(e => e.type === "message" && e.id === report.id)).checks, { ok: true, notes: [] });
+    const checked = (await b.next(e => e.type === "message" && e.id === report.id)).checks;
+    assert.deepEqual(checked, { ok: true, notes: [] });
     const ready = JSON.parse(readFileSync(join(e2.PI_CREW_DIR, key, "workers.json"), "utf8"));
     assert.equal(ready.find((w: { name: string; allowDefaultBranch?: boolean }) => w.name === "onmain").allowDefaultBranch, true);
     assert.equal((await call({ op: "stop", name: "onmain" }, key, e2)).code, 0);
@@ -401,7 +432,7 @@ test("lead feedback: default-branch guard, DONE checks, idle alerts, send by ses
     const inboxFile = join(e2.PI_CREW_DIR, key, "inbox.json");
     const id = "replayed-done-1";
     writeFileSync(inboxFile, JSON.stringify([{
-      type: "message", from: { id: slimId, name: "slim", cwd: wt, worker: "slim" }, id, expectsReply: false, kind: "done", text: "DONE: shipped",
+      type: "message", runId: JSON.parse(readFileSync(join(e2.PI_CREW_DIR, key, "workers.json"), "utf8")).find((w: any) => w.name === "slim").runId, from: { id: slimId, name: "slim", cwd: wt, worker: "slim" }, id, expectsReply: false, kind: "done", text: "DONE: shipped",
     }]));
     b = new Bridge(key, e2);
     const ev = await b.next(e => e.type === "message" && e.id === id);

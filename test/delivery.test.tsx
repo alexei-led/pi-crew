@@ -128,3 +128,16 @@ test('ages redraw each minute while any worker is listed, a stopped one too', as
   await w.clock.advance(60_000)
   expect(w.tick()).toBe(1)
 })
+
+test('progress from an earlier run waits for the user instead of joining the new run DONE', async ($, on) => {
+  const w = world(on, [
+    { ...from('report', 'old-progress', 'earlier run progress'), runId: 'old' },
+    { ...from('done', 'new-done', 'DONE: new result'), runId: 'new' },
+  ], [{ ...api, runId: 'new' }])
+  await lead($, w)
+  expect(w.turns[0]).not.toMatch(/earlier run progress/)
+  expect(w.held()).toEqual(['old-progress'])
+  await $.prompt.submit({ text: 'show reports', ...USER })
+  expect(w.prompts[0]?.[0]).toMatch(/previous run/)
+  expect(w.acks).toEqual(['new-done', 'old-progress'])
+})
