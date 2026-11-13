@@ -1,11 +1,12 @@
 {
   "name": "pi-crew",
   "owner": { "name": "Alexei Ledenev" },
+  "description": "Delegate tasks to Pi workers from Claude Code. Track progress, answer questions, and review reports in agterm.",
   "plugins": [
     {
       "name": "pi-crew",
       "source": "./",
-      "description": "Lead a crew of Pi workers in agterm over pi-intercom: spawn, message, and get woken by their questions and finished work."
+      "description": "Delegate tasks to Pi workers from Claude Code. Track progress, answer questions, and review reports in agterm."
     }
   ]
 }

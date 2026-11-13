@@ -1,4 +1,5 @@
 .claude-plugin/types/
+.claude/settings.local.json
 node_modules/
 .DS_Store
 .revmux/

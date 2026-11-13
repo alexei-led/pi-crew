@@ -1,5 +1,5 @@
 // Pure view logic shared by the band, the pane and the turn text: one vocabulary of glyphs, numbers and names.
-// Glyphs, words and tones follow the screen contract shared with crew-net (README, "With crew-net"); a test pins them.
+// Glyphs, words and tones follow the screen contract shared with crew-net (docs/guide.md, "With crew-net"); a test pins them.
 import type { CrewFilter, CrewInbound, CrewMsg, CrewState, CrewTab, CrewWorker } from '../types'
 
 export const GLYPH: Record<CrewState, string> = { ask: '◆', work: '●', idle: '○', gone: '✕' }

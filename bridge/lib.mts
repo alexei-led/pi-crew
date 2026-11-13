@@ -213,16 +213,21 @@ export async function verifyDone(fields: DoneFields, cwd: string, git: Git, allo
     const claimed = fields.head.toLowerCase();
     if (claimed.length < 7 || !head.startsWith(claimed)) notes.push(`head ${fields.head} is not HEAD ${head.slice(0, 12)}`);
   }
-  const branch = (await git(cwd, ["branch", "--show-current"])) ?? "";
+  const checkedGit: Git = async (dir, args) => {
+    const out = await git(dir, args);
+    if (out === undefined) notes.push(`git ${args.join(" ")} failed in ${dir}; checkout unchecked`);
+    return out;
+  };
+  const branch = (await checkedGit(cwd, ["branch", "--show-current"])) ?? "";
   if (fields.branch && fields.branch !== branch) notes.push(`branch ${fields.branch} is not the checked-out ${branch || "detached HEAD"}`);
   const base = await defaultBranch(git, cwd);
   if (!allowDefaultBranch && base && branch === base) notes.push(`on the default branch ${base}`);
-  const dirty = await git(cwd, ["status", "--porcelain"]);
+  const dirty = await checkedGit(cwd, ["status", "--porcelain"]);
   if (dirty) notes.push(`uncommitted changes in ${cwd}: ${dirty.split("\n").length} path(s)`);
   // The first worktree listed is the main checkout: edits that escaped a linked worktree land there.
-  const main = /^worktree (.+)$/m.exec((await git(cwd, ["worktree", "list", "--porcelain"])) ?? "")?.[1];
-  const top = await git(cwd, ["rev-parse", "--show-toplevel"]);
-  if (main && top && main !== top && (await git(main, ["status", "--porcelain"]))) notes.push(`main checkout ${main} has uncommitted changes`);
+  const main = /^worktree (.+)$/m.exec((await checkedGit(cwd, ["worktree", "list", "--porcelain"])) ?? "")?.[1];
+  const top = await checkedGit(cwd, ["rev-parse", "--show-toplevel"]);
+  if (main && top && main !== top && (await checkedGit(main, ["status", "--porcelain"]))) notes.push(`main checkout ${main} has uncommitted changes`);
   return { ok: notes.length === 0, notes };
 }
 
