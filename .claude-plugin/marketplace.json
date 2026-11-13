@@ -1,12 +1,12 @@
 {
   "name": "pi-crew",
   "owner": { "name": "Alexei Ledenev" },
-  "description": "Delegate tasks to Pi workers from Claude Code. Track progress, answer questions, and review reports in agterm.",
+  "description": "Delegate Pi workers from Claude Code and observe mixed Pi/Claude crews, messages, and reports in agterm.",
   "plugins": [
     {
       "name": "pi-crew",
       "source": "./",
-      "description": "Delegate tasks to Pi workers from Claude Code. Track progress, answer questions, and review reports in agterm."
+      "description": "Delegate Pi workers from Claude Code and observe mixed Pi/Claude crews, messages, and reports in agterm."
     }
   ]
 }

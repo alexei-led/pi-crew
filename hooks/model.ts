@@ -1,6 +1,6 @@
 // Pure view logic shared by the band, the pane and the turn text: one vocabulary of glyphs, numbers and names.
 // Glyphs and tones follow the screen contract shared with crew-net (docs/guide.md, "With crew-net"); a test pins them.
-import type { CrewHistory, CrewInbound, CrewMsg, CrewState, CrewView, CrewWorker } from '../types'
+import type { ClaudeCrew, ClaudeMsg, ClaudeStatus, ClaudeView, ClaudeWorker, CrewHistory, CrewInbound, CrewMsg, CrewState, CrewView, CrewWorker } from '../types'
 
 export const GLYPH: Record<CrewState, string> = { ask: '◆', work: '●', idle: '○', gone: '✕' }
 /** Theme keys, so both plugins draw one shade; `dim` is dimmed text of no color. */
@@ -140,9 +140,11 @@ export function workerSummary(w: CrewWorker, feed: CrewMsg[]): { label: string; 
   return { label: 'DONE reported', evidence: done.checks ? 'git checks ' + (done.checks.ok ? 'passed' : 'failed') : 'git checks not recorded' }
 }
 
-export function observerBand(ws: CrewWorker[], cols: number): string {
+export function observerBand(ws: CrewWorker[], cols: number, native: ClaudeWorker[] = []): string {
   const t = tally(ws)
-  const parts = ['crew ' + t.crew]
+  const active = native.filter(w => w.present && !['completed', 'failed', 'killed'].includes(w.status)).length
+  const parts = ['crew ' + (t.crew + active)]
+  if (native.length) parts.push('Pi ' + t.crew, 'Claude ' + native.length + ' retained')
   for (const [count, full, compact] of [
     [t.ask, '◆ ' + t.ask + ' waiting on lead', '◆' + t.ask],
     [t.work, '● ' + t.work + ' on task', '●' + t.work],
@@ -188,4 +190,68 @@ export function observeMessage(v: CrewView, m: CrewMsg): CrewView {
   if (!v.following) return existing ? v : { ...v, newer: [...new Set([...v.newer, m.id])].slice(-500) }
   const messages = mergeMessages(v.history.messages, [m])
   return { ...v, history: { ...v.history, messages: messages.slice(-HISTORY_PAGE_SIZE), hasOlder: v.history.hasOlder || messages.length > 10 } }
+}
+
+/** Native status names are not Pi task states: in particular, waiting does not imply a question. */
+export const CLAUDE_LABEL: Record<ClaudeStatus, string> = {
+  pending: 'pending', running: 'running', waiting: 'waiting', idle: 'idle',
+  completed: 'completed', failed: 'failed', killed: 'stopped',
+}
+export function claudeLabel(w: ClaudeWorker): string {
+  const label = CLAUDE_LABEL[w.status]
+  if (!w.present) return 'not tracked · last ' + label
+  return w.id === w.teammateId ? 'reported ' + label + ' · liveness unverified' : label
+}
+
+export function claudeText(text: string): string {
+  return text.length > 16_000 ? text.slice(0, 16_000) + '\n… [observer text truncated]' : text
+}
+
+export function claudeRoster(
+  previous: ClaudeWorker[],
+  roster: Array<{ id: string; name?: string; teammateId?: string; parentId?: string; description: string; type: string; status: ClaudeStatus }>,
+  now: number,
+): ClaudeWorker[] {
+  const live = new Set(roster.map(w => w.id))
+  const old = new Map(previous.map(w => [w.id, w]))
+  const current = roster.map(w => {
+    const previous = old.get(w.id)
+    if (previous?.present && (['name', 'teammateId', 'parentId', 'description', 'type', 'status'] as const).every(key => previous[key] === w[key])) return previous
+    return {
+      ...previous, id: w.id, name: w.name, teammateId: w.teammateId, parentId: w.parentId,
+      description: w.description, type: w.type, status: w.status,
+      generation: previous?.generation ?? 1, present: true, startedAt: previous?.startedAt ?? now, lastAt: previous?.lastAt ?? now,
+    }
+  })
+  const absent = previous.filter(w => !live.has(w.id) && now - w.lastAt < 30 * 60_000).map(w => w.present ? { ...w, present: false } : w)
+  return [...current, ...absent].slice(0, 100)
+}
+
+/** Names are addresses only when unique, and never a replacement for the engine's agent id. */
+export function resolveClaude(workers: ClaudeWorker[], to: string): ClaudeWorker | undefined {
+  const exact = workers.find(w => w.id === to)
+  if (exact) return exact
+  const matches = workers.filter(w => w.present && (w.name === to || w.teammateId === to))
+  return matches.length === 1 ? matches[0] : undefined
+}
+
+export function claudeMessage(c: ClaudeCrew, msg: ClaudeMsg): ClaudeCrew {
+  const perWorker = new Map<string, number>()
+  const messages = [...c.messages, msg].filter(m => msg.at - m.at < 86_400_000).reverse().filter(m => {
+    const key = m.worker + '/' + m.generation
+    const count = (perWorker.get(key) ?? 0) + 1
+    perWorker.set(key, count)
+    return count <= 50
+  }).slice(0, 200).reverse()
+  return {
+    ...c, sequence: c.sequence + 1, messages,
+    workers: c.workers.map(w => w.id === msg.worker ? { ...w, lastAt: msg.at } : w),
+  }
+}
+
+/** A frozen native thread, like Pi history, only accumulates observer-local newer ids. */
+export function observeClaude(v: ClaudeView, sessionId: string, m: ClaudeMsg): ClaudeView {
+  if (v.selected?.sessionId !== sessionId || v.selected.id !== m.worker || v.selected.generation !== m.generation) return v
+  if (!v.following) return { ...v, newer: [...new Set([...v.newer, m.id])].slice(-200) }
+  return { ...v, messages: [...v.messages.filter(p => p.id !== m.id), m].slice(-50) }
 }

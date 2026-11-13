@@ -1,6 +1,6 @@
 # User guide
 
-[Install pi-crew](../README.md#install) first. Claude Code is the **lead**. Its Pi workers form the **crew**.
+[Install pi-crew](../README.md#install) first. Claude Code is the **lead**. Its Pi workers and observed native Claude workers form the **crew**.
 The pane is for observing. Direct agents through their terminals, usually your conversation with the lead.
 
 ## Follow the crew
@@ -30,9 +30,9 @@ Zero counts hide. Narrow layouts shorten labels or omit secondary counts.
 The band has one navigation action: `c` opens Crew while the band is focused (`ctrl+x tab`).
 There is no observer unread counter or message inbox.
 
-## Explore a conversation
+## Explore a Pi conversation
 
-A thread opens with the latest 10 retained messages, in chronological order.
+A Pi worker thread opens with the latest 10 retained messages, in chronological order.
 Use **older retained messages** to read earlier exchanges. Long messages can be expanded.
 **latest** returns to the recent tail.
 
@@ -60,7 +60,40 @@ To answer or redirect a worker, ask the lead in its terminal. The pane has no re
 Workers numbered 10 or higher have no digit shortcut.
 The host owns the close mark. Closing the pane does not stop any worker.
 
-## Assignments
+## Native Claude workers
+
+The overview separates **Pi workers** and **Claude workers**, including workers with the same display name.
+Native workers are this conversation's subagents and teammates, discovered through Claude's mod API.
+The roster refreshes every five seconds. The band's Claude count includes recent retained workers, not only active ones.
+Native observation continues if the Pi bridge is unavailable.
+
+Select a Claude row to see its observed initial assignment, lead/worker messages and final turn reports.
+A message marked **queued** is not a read receipt. Reports do not verify tests or work.
+Nested assignments name the parent agent rather than the lead.
+The observer does not reconstruct all worker-to-worker communication or infer assignments from arbitrary replies.
+
+Claude keeps its native statuses: pending, running, waiting, idle, completed, failed and stopped.
+**Waiting** does not necessarily mean a question for the lead; **idle** is not completion.
+**Not tracked** shows the last known status after an agent leaves the host roster, not proof that it stopped.
+A teammate in another terminal pane shows reported status with unverified liveness.
+
+- **latest messages** (`l`) returns to recent observed communication. Scrolling back or expanding text freezes that snapshot; incoming messages add a newer count.
+- **conversation snapshot** (`c`) explicitly reads the latest 50 conversation rows when available. It shows visible text and tool names, not tool arguments, outputs or thinking. Refresh explicitly; the observer never polls full transcripts.
+- An unavailable conversation displays the host's denial. Full pane-hosted conversations cannot be read through this API. Mailbox messages from those workers identify the sender as claimed and unverified.
+- Native navigation does not change which agent receives the next prompt.
+
+Native observation retains at most 100 worker records and 50 messages per spawn generation, with a global 200-message cap and 24-hour feed expiry.
+Workers absent from the roster expire 30 minutes after their last observed activity.
+Text is clipped at 16,000 characters with an explicit truncation marker.
+These limits are independent of `PI_CREW_HISTORY_LIMIT`, which controls Pi history only.
+This is not a complete archive: messages before observation, during an unloaded plugin, or after expiry may be unavailable.
+Conversation changes reset native observations and selection; a plugin reload keeps retained state.
+
+Use Claude's native Agent/SendMessage controls to manage Claude workers. The four pi-crew lead tools below still manage Pi workers only.
+There is no new Pi extension: a Pi lead uses its existing orchestration UI. Pi workers using Claude models remain Pi workers.
+Actual Claude Code CLI children launched through pi-subagents have common run status/results, but its one-shot Claude adapters do not support native supervisor messaging, steering or resume.
+
+## Pi assignments
 
 Spawn records its first `task` separately from progress messages.
 For a new assignment on an existing worker, the lead sends both the full instructions in `text` and a short summary in `task`.
@@ -69,7 +102,7 @@ For answers and nudges, omit `task`. They must not replace the assignment.
 Workers without assignment metadata show **No recorded assignment**.
 The pane does not infer a task from an arbitrary message.
 
-## Reports and lead turns
+## Pi reports and lead turns
 
 | Incoming message | Delivery |
 | --- | --- |
@@ -160,6 +193,8 @@ Restart or reload the plugin after updating.
 | Worker exits at launch | Inspect its terminal, executable, model id, and credentials. |
 | Bridge cannot import pi-intercom or tsx | Check the package setting. |
 | No report | Ask the lead to inspect the worker. Busy workers do not trigger quiet alerts. |
+| Native conversation unavailable | The host cannot read that worker's conversation. Use its terminal or native agent controls; the observer does not scan private files. |
+| Claude roster unavailable | Native API discovery failed. Pi records remain available; retry after resolving the host error. |
 | History cursor expired or worker restarted | Return to latest or reopen the worker's new run from Crew. |
 | Bridge stopped or a report could not start a turn | Reload the plugin to reconnect and replay unacknowledged reports. |
 

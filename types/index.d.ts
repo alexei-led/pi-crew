@@ -104,9 +104,53 @@ export type CrewView = {
   error?: string
 }
 
+export type ClaudeStatus = 'pending' | 'running' | 'waiting' | 'idle' | 'completed' | 'failed' | 'killed'
+
+/** Native Claude records are observer state, never Pi bridge/control records. */
+export type ClaudeWorker = {
+  id: string
+  generation: number
+  name?: string
+  teammateId?: string
+  parentId?: string
+  description: string
+  type: string
+  status: ClaudeStatus
+  present: boolean
+  startedAt: number
+  lastAt: number
+  spawnId?: string
+  task?: string
+  model?: string
+}
+export type ClaudeMsg = {
+  id: string
+  worker: string
+  generation: number
+  at: number
+  kind: 'assignment' | 'message' | 'result'
+  sender: 'lead' | 'worker' | 'parent'
+  text: string
+  delivery?: 'queued' | 'unverified'
+}
+export type ClaudeCrew = { sessionId: string; workers: ClaudeWorker[]; messages: ClaudeMsg[]; sequence: number; error?: string }
+export type ClaudeView = {
+  selected?: { sessionId: string; id: string; generation: number }
+  messages: ClaudeMsg[]
+  following: boolean
+  newer: string[]
+  expanded: string[]
+  request: number
+  loading: boolean
+  conversation?: Array<{ role: 'user' | 'assistant'; text: string; tools: string[] }>
+  error?: string
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'pi-crew': {
+      claude: Shaped<ClaudeCrew>
+      claudeView: Shaped<ClaudeView>
       workers: Shaped<CrewWorker[]>
       feed: Shaped<CrewMsg[]>
       view: Shaped<CrewView>

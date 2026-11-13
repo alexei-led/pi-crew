@@ -24,6 +24,8 @@ function world(on: On, events: object[], workers: object[] = [api]) {
   const turns: string[] = []
   const prompts: Array<readonly string[] | undefined> = []
   let refusal: string | undefined
+  on('session.id', () => ({ value: 'conversation-1' }))
+  on('agent.list', () => ({ value: [] }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   for (const noun of ['tool.register', 'command.register', 'ui.status', 'ui.log', 'ui.toast'] as const) on(noun, () => ({ value: undefined }))
   const ran = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })

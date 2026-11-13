@@ -29,6 +29,8 @@ function world(on: On, options: { selected?: boolean; view?: Record<string, unkn
   const clock = mock.clock(on)
   const calls: Array<Record<string, unknown>> = []
   const pages: object[] = []
+  on('session.id', () => ({ value: 'conversation-1' }))
+  on('agent.list', () => ({ value: [] }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   for (const event of ['tool.register', 'command.register', 'ui.status', 'ui.log', 'ui.toast'] as const) on(event, () => ({ value: undefined }))
   on('process.run', (_, e) => {

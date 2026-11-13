@@ -58,7 +58,9 @@ The human observes the crew in a read-only pane. The band shows crew/task counts
 Lead/worker exchanges, retained older messages, and git-check evidence. Legacy outgoing authors can appear as
 "To worker" when their identity is unknown.
 
-The human can browse, expand text, or open a worker terminal. Reading the pane does not clear your unread counts,
+The pane also observes this conversation's native Claude subagents and teammates. Keep using Claude's native tools for them; pi-crew's four tools still manage Pi workers only. Native threads show observed messages/reports and an explicit conversation snapshot when the host allows it, not Pi DONE checks.
+
+The human can browse, expand text, or open a Pi worker terminal. Reading the pane does not clear your unread counts,
 acknowledge messages, send replies, or stop workers. Human direction comes through agent terminals, usually your
 conversation with the user. You remain responsible for answering questions and managing workers.
 
