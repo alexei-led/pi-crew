@@ -4,7 +4,7 @@
 
 Running several agents in separate terminals means watching for blockers and copying results between sessions.
 pi-crew gives Claude Code a crew of [Pi](https://github.com/badlogic/pi-mono) workers in [agterm](https://agterm.dev).
-The lead assigns tasks, answers questions, and reviews completed work. You see their status and messages in one crew pane.
+The lead assigns tasks, answers questions, and reviews completed work. You observe assignments and conversations in a read-only crew pane. Direct the agents through their terminals.
 
 ```mermaid
 flowchart LR
@@ -53,7 +53,7 @@ Ask Claude Code:
 
 > Create a worktree for a Pi worker named `api`. Have it add a health endpoint, run the relevant tests, commit its changes, and report back.
 
-Each worker opens in a separate agterm session. Use `/crew` to inspect or answer it, or ask Claude to handle its questions.
+Each worker opens in a separate agterm session. Use `/crew` to explore its recent conversation. Ask the lead to answer questions or redirect work.
 
 **Workers are not sandboxed.** Use one worktree per editing worker and review its diff before merging.
 DONE checks compare reports with git state. They do not prove that tests ran or that the work is correct.

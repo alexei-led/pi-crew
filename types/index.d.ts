@@ -13,6 +13,10 @@ export type CrewWorker = {
   agtermSession?: string
   /** Spawn order: the number the UI shows next to the name. Not reused while the record exists. */
   n: number
+  /** Unique identity for this spawn; stable across bridge restarts. Legacy workers can lack it until respawn. */
+  runId?: string
+  /** The latest task explicitly assigned to this run. */
+  task?: { text: string; at: number }
   group?: string
   state: CrewState
   unread: number
@@ -34,12 +38,20 @@ export type CrewMsg = {
   worker?: string
   peer: string
   replyTo?: string
+  /** The worker run and sender identity are absent on legacy feed records. */
+  runId?: string
+  sender?: 'lead' | 'worker'
+  checks?: { ok: boolean; notes: string[]; at: number }
 }
+
+/** One chronological page from the current worker run's retained feed. */
+export type CrewHistory = { name: string; runId?: string; messages: CrewMsg[]; hasOlder: boolean }
 
 /** A request to the bridge's control socket: `crew-bridge call --key <k> '<json>'`. */
 export type CrewRequest =
   | { op: 'list' }
-  | { op: 'send'; to: string; text: string; replyTo?: string }
+  | { op: 'send'; to: string; text: string; replyTo?: string; task?: string }
+  | { op: 'history'; name: string; runId?: string; before?: string; limit?: number }
   | { op: 'spawn'; name: string; cwd: string; model?: string; task?: string; group?: string; allowDefaultBranch?: boolean }
   | { op: 'stop'; name: string }
   | { op: 'read'; name: string }
@@ -48,6 +60,7 @@ export type CrewRequest =
 
 export type CrewInboundBase = {
   type: 'message'
+  runId?: string
   from: { id: string; name?: string; cwd: string; worker?: string }
   id: string
   replyTo?: string
@@ -77,18 +90,18 @@ export type BridgeEvent =
   | { type: 'error'; error: string }
   | CrewInbound
 
-export type CrewFilter ='all' | CrewState
-export type CrewTab = 'inbox' | 'crew'
-
-/** What the pane shows. `sel` is the worker whose detail fills the pane; `showAll` widens its latest messages; `questionExpanded` shows the full question. */
 export type CrewView = {
-  tab: CrewTab
-  filter: CrewFilter
   sel?: string
-  showAll: boolean
-  questionExpanded: boolean
+  runId?: string
   collapsed: string[]
-  confirmStop?: string
+  expanded: string[]
+  following: boolean
+  newer: string[]
+  request: number
+  loading?: boolean
+  arriving?: CrewMsg[]
+  history?: CrewHistory
+  error?: string
 }
 
 declare module 'claude-code' {

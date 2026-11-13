@@ -17,7 +17,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import { createCrew, type IntercomClient } from "./crew.mts";
-import { KEY, controlPath, crewDir, crewRoot, errorMessage, idleMs, intercomPkg, type Git } from "./lib.mts";
+import { KEY, controlPath, crewDir, crewRoot, errorMessage, historyLimit, idleMs, intercomPkg, type Git } from "./lib.mts";
 import type { BridgeEvent } from "../types/index.d.ts";
 
 const run = promisify(execFile);
@@ -80,6 +80,7 @@ async function serve(key: string, leadName: string) {
     defaultModel: process.env.PI_CREW_DEFAULT_MODEL,
     exitCheckMs: EXIT_CHECK_MS,
     idleMs: idleMs(),
+    historyLimit: historyLimit(),
   });
 
   // Handlers first: the broker flushes queued mailbox messages at registration.

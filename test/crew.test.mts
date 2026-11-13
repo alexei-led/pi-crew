@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { createCrew, type Crew, type CrewDeps, type Incoming, type Peer } from "../bridge/crew.mts";
-import { stableId, type Git, type SessionInfo } from "../bridge/lib.mts";
+import { readLines, stableId, type Git, type SessionInfo } from "../bridge/lib.mts";
 import type { BridgeEvent } from "../types/index.d.ts";
 
 const KEY = "pane-1";
@@ -81,14 +81,43 @@ async function until(check: () => boolean, what: string) {
 
 test("spawn records the worker, writes brief and launcher, opens the agterm session after the lead's", async () => {
   const s = setup();
-  const { worker } = (await s.crew.handle({ op: "spawn", name: "api", cwd: "/work", task: "build it", group: "backend" })) as { worker: any };
-  assert.deepEqual([worker.id, worker.model, worker.n, worker.group, worker.state, worker.agtermSession], [API_ID, "test/model", 1, "backend", "work", "s1"]);
+  const { worker } = (await s.crew.handle({
+    op: "spawn",
+    name: "api",
+    cwd: "/work",
+    task: "build it",
+    group: "backend",
+  })) as { worker: any };
+  assert.deepEqual(
+    [worker.id, worker.model, worker.n, worker.group, worker.state, worker.agtermSession],
+    [API_ID, "test/model", 1, "backend", "work", "s1"],
+  );
+  assert.equal(typeof worker.runId, "string");
+  assert.deepEqual(worker.task, { text: "build it", at: s.clock.at });
   assert.equal(worker.last.text, "you: build it");
   assert.match(readFileSync(join(s.dir, "workers/api/brief.md"), "utf8"), /First task:\nbuild it$/);
   assert.match(readFileSync(join(s.dir, "workers/api/launch.sh"), "utf8"), /--model 'test\/model'/);
-  assert.deepEqual(s.agtermCalls[0]!.slice(0, 5), ["session", "new", "--after", "lead-pane", "--no-select"]);
+  assert.deepEqual(s.agtermCalls[0]!.slice(0, 5), [
+    "session",
+    "new",
+    "--after",
+    "lead-pane",
+    "--no-select",
+  ]);
   assert.equal(json(s.dir, "workers.json")[0].agtermSession, "s1");
-  assert.deepEqual(eventsOf(s, "feed").map(e => [e.msg.kind, e.msg.text, e.msg.worker]), [["out", "build it", "api"]]);
+  assert.deepEqual(
+    eventsOf(s, "feed").map((e) => [e.msg.kind, e.msg.text, e.msg.worker]),
+    [["out", "build it", "api"]],
+  );
+  assert.deepEqual(
+    [eventsOf(s, "feed")[0]!.msg.sender, eventsOf(s, "feed")[0]!.msg.runId],
+    ["lead", worker.runId],
+  );
+  const restarted = setup({ dir: s.dir });
+  const history = (await restarted.crew.handle({ op: "history", name: "api" })) as {
+    runId: string;
+  };
+  assert.equal(history.runId, worker.runId, "the persisted run identity survives bridge restart");
 });
 
 test("spawn is refused for a bad name or group, a duplicate, a missing agterm, or the default branch", async () => {
@@ -117,24 +146,214 @@ test("a failed agterm session leaves the worker gone and says why", async () => 
   assert.equal(again.worker.n, 2, "a gone name can be spawned again, with a new number");
 });
 
-test("send to a worker by name goes to its id and updates the record and the feed", async () => {
+test("send tasks update only when explicitly named and delivered", async () => {
   const s = setup();
-  await s.crew.handle({ op: "spawn", name: "api", cwd: "/w" });
+  await s.crew.handle({ op: "spawn", name: "api", cwd: "/w", task: "initial task" });
+  const initialTask = lastWorkers(s)[0]!.task;
   s.crew.onMessage(peer(API_ID), incoming("r1", "progress"));
   assert.equal(lastWorkers(s)[0]!.unread, 1);
-  const reply = (await s.crew.handle({ op: "send", to: "api", text: "next task" })) as { to: string; delivered: boolean };
-  assert.deepEqual([reply.to, reply.delivered, s.sent], [API_ID, true, [{ to: API_ID, text: "next task" }]]);
-  const w = lastWorkers(s)[0]!;
-  assert.deepEqual([w.state, w.unread, w.last!.text], ["work", 0, "you: next task"]);
-  assert.deepEqual(eventsOf(s, "feed").at(-1)!.msg.kind, "out");
+  const reply = (await s.crew.handle({ op: "send", to: "api", text: "ordinary reply" })) as {
+    to: string;
+    delivered: boolean;
+  };
+  assert.deepEqual(
+    [reply.to, reply.delivered, s.sent],
+    [API_ID, true, [{ to: API_ID, text: "ordinary reply" }]],
+  );
+  let w = lastWorkers(s)[0]!;
+  assert.deepEqual(
+    [w.state, w.unread, w.last!.text, w.task],
+    ["work", 0, "you: ordinary reply", initialTask],
+  );
+  assert.deepEqual(
+    [eventsOf(s, "feed").at(-1)!.msg.sender, eventsOf(s, "feed").at(-1)!.msg.runId],
+    ["lead", w.runId],
+  );
+
+  await s.crew.handle({ op: "send", to: "api", text: "begin search", task: "search the codebase" });
+  w = lastWorkers(s)[0]!;
+  assert.deepEqual(w.task, { text: "search the codebase", at: s.clock.at });
+  assert.equal(json(s.dir, "workers.json")[0].task.text, "search the codebase");
 });
 
-test("send that the broker does not deliver is an error and records nothing", async () => {
+test("send that the broker does not deliver is an error and records or updates nothing", async () => {
+  const s = setup();
+  await s.crew.handle({ op: "spawn", name: "api", cwd: "/w", task: "existing task" });
+  const before = lastWorkers(s)[0]!.task;
+  s.sendResults.push({ delivered: false, reason: "offline", code: "E_OFFLINE" });
+  await assert.rejects(
+    s.crew.handle({ op: "send", to: "api", text: "x", task: "undelivered task" }),
+    /not delivered to api: offline \(E_OFFLINE\)/,
+  );
+  assert.deepEqual(lastWorkers(s)[0]!.task, before);
+  assert.equal(eventsOf(s, "feed").length, 1, "only the spawn task was recorded");
+});
+
+test("history pages chronologically with exclusive cursors and never changes inbox or unread state", async () => {
   const s = setup();
   await s.crew.handle({ op: "spawn", name: "api", cwd: "/w" });
-  s.sendResults.push({ delivered: false, reason: "offline", code: "E_OFFLINE" });
-  await assert.rejects(s.crew.handle({ op: "send", to: "api", text: "x" }), /not delivered to api: offline \(E_OFFLINE\)/);
-  assert.equal(eventsOf(s, "feed").length, 0);
+  for (let i = 1; i <= 12; i++)
+    s.crew.onMessage(peer(API_ID), incoming(`h${String(i).padStart(2, "0")}`, `message ${i}`));
+  const workersBefore = readFileSync(join(s.dir, "workers.json"), "utf8");
+  const inboxBefore = readFileSync(join(s.dir, "inbox.json"), "utf8");
+  const feedBefore = readFileSync(join(s.dir, "feed.jsonl"), "utf8");
+  const receiptsBefore = [...s.receipts];
+  const eventsBefore = s.events.length;
+
+  const first = (await s.crew.handle({ op: "history", name: "api" })) as {
+    runId: string;
+    messages: Array<{ id: string }>;
+    hasOlder: boolean;
+  };
+  assert.equal(first.runId, lastWorkers(s)[0]!.runId);
+  assert.deepEqual(
+    first.messages.map((m) => m.id),
+    Array.from({ length: 10 }, (_, i) => `h${String(i + 3).padStart(2, "0")}`),
+  );
+  assert.equal(first.hasOlder, true);
+  const older = (await s.crew.handle({ op: "history", name: "api", before: "h08", limit: 3 })) as {
+    messages: Array<{ id: string }>;
+    hasOlder: boolean;
+  };
+  assert.deepEqual(
+    older.messages.map((m) => m.id),
+    ["h05", "h06", "h07"],
+  );
+  assert.equal(older.hasOlder, true);
+  const oldest = (await s.crew.handle({ op: "history", name: "api", before: "h03", limit: 5 })) as {
+    messages: Array<{ id: string }>;
+    hasOlder: boolean;
+  };
+  assert.deepEqual(
+    oldest.messages.map((m) => m.id),
+    ["h01", "h02"],
+  );
+  assert.equal(oldest.hasOlder, false);
+
+  assert.deepEqual(
+    [
+      readFileSync(join(s.dir, "workers.json"), "utf8"),
+      readFileSync(join(s.dir, "inbox.json"), "utf8"),
+      readFileSync(join(s.dir, "feed.jsonl"), "utf8"),
+      s.receipts,
+      s.events.length,
+    ],
+    [workersBefore, inboxBefore, feedBefore, receiptsBefore, eventsBefore],
+    "history reads are side-effect free",
+  );
+});
+
+test("history reads older data beyond the 200-message UI replay cap", async () => {
+  const s = setup({ deps: { historyLimit: 500 } });
+  await s.crew.handle({ op: "spawn", name: "api", cwd: "/w" });
+  for (let i = 1; i <= 210; i++)
+    s.crew.onMessage(peer(API_ID), incoming(`m${String(i).padStart(3, "0")}`, `message ${i}`));
+  s.crew.ready();
+  assert.equal(eventsOf(s, "ready")[0]!.feed.length, 200);
+  const page = (await s.crew.handle({ op: "history", name: "api", before: "m210", limit: 50 })) as {
+    messages: Array<{ id: string }>;
+    hasOlder: boolean;
+  };
+  assert.equal(page.messages.length, 50);
+  assert.deepEqual([page.messages[0]!.id, page.messages.at(-1)!.id], ["m160", "m209"]);
+  assert.equal(page.hasOlder, true);
+});
+
+test("history rejects expired or unknown cursors and a requested run that is not current", async () => {
+  const s = setup();
+  await s.crew.handle({ op: "spawn", name: "api", cwd: "/w" });
+  const oldRunId = lastWorkers(s)[0]!.runId;
+  s.crew.onMessage(peer(API_ID), incoming("old", "old message"));
+  await s.crew.handle({ op: "stop", name: "api" });
+  const spawned = (await s.crew.handle({ op: "spawn", name: "api", cwd: "/w" })) as {
+    worker: { runId: string };
+  };
+  assert.notEqual(spawned.worker.runId, oldRunId, "respawn gets a fresh run identity");
+  await assert.rejects(
+    s.crew.handle({ op: "history", name: "api", runId: "not-current" }),
+    /run.*mismatch|not current/i,
+  );
+  await assert.rejects(
+    s.crew.handle({ op: "history", name: "api", before: "old" }),
+    /cursor.*(retained|unknown|history)/i,
+  );
+  s.crew.onMessage(peer(API_ID), incoming("fresh", "fresh message"));
+  s.clock.at += 25 * 60 * 60_000;
+  s.crew.prune();
+  await assert.rejects(
+    s.crew.handle({ op: "history", name: "api", before: "fresh" }),
+    /cursor.*(retained|unknown|history)/i,
+  );
+});
+
+test("history keeps legacy messages and unknown legacy senders until the worker is respawned", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-crew-unit-"));
+  const legacy = {
+    name: "api",
+    id: API_ID,
+    cwd: "/w",
+    model: "m",
+    n: 1,
+    state: "idle",
+    unread: 0,
+    startedAt: 1,
+    lastAt: 1,
+  };
+  writeFileSync(join(dir, "workers.json"), JSON.stringify([legacy]));
+  writeFileSync(
+    join(dir, "feed.jsonl"),
+    [
+      { id: "legacy-out", at: 2, kind: "out", text: "old task", peer: "api", worker: "api" },
+      { id: "legacy-in", at: 3, kind: "report", text: "old reply", peer: "api", worker: "api" },
+    ]
+      .map((x) => JSON.stringify(x))
+      .join("\n") + "\n",
+  );
+  const s = setup({ dir });
+  const old = (await s.crew.handle({ op: "history", name: "api" })) as {
+    runId?: string;
+    messages: Array<{ id: string; sender?: string }>;
+  };
+  assert.equal(old.runId, undefined);
+  assert.deepEqual(
+    old.messages.map((m) => m.id),
+    ["legacy-out", "legacy-in"],
+  );
+  assert.equal(
+    old.messages[0]!.sender,
+    undefined,
+    "do not manufacture lead identity for legacy outgoing messages",
+  );
+  await s.crew.handle({ op: "stop", name: "api" });
+  await s.crew.handle({ op: "spawn", name: "api", cwd: "/w" });
+  const current = (await s.crew.handle({ op: "history", name: "api" })) as {
+    runId: string;
+    messages: Array<{ id: string }>;
+  };
+  assert.equal(typeof current.runId, "string");
+  assert.deepEqual(current.messages, []);
+});
+
+test("history retention honors a configured per-run cap and the 24-hour expiry", async () => {
+  const s = setup({ deps: { historyLimit: 2 } });
+  await s.crew.handle({ op: "spawn", name: "api", cwd: "/w" });
+  for (let i = 1; i <= 3; i++) s.crew.onMessage(peer(API_ID), incoming(`r${i}`, `message ${i}`));
+  s.crew.prune();
+  const history = (await s.crew.handle({ op: "history", name: "api" })) as {
+    messages: Array<{ id: string }>;
+    hasOlder: boolean;
+  };
+  assert.deepEqual(
+    history.messages.map((m) => m.id),
+    ["r2", "r3"],
+  );
+  assert.equal(history.hasOlder, false, "pruned entries are not advertised as older pages");
+  s.clock.at += 24 * 60 * 60_000;
+  s.crew.prune();
+  assert.deepEqual(
+    ((await s.crew.handle({ op: "history", name: "api" })) as { messages: unknown[] }).messages,
+    [],
+  );
 });
 
 test("a Q: report opens a question, the reply closes it; an ask is answered with replyTo until the broker drops it", async () => {
@@ -167,6 +386,7 @@ test("a message seen twice is stored once but receipted both times; ack drops it
   assert.deepEqual(s.receipts, ["m1", "m1"]);
   assert.equal(eventsOf(s, "feed").length, 1);
   assert.equal(eventsOf(s, "feed")[0]!.msg.peer, "ci");
+  assert.equal(eventsOf(s, "feed")[0]!.msg.sender, undefined, "unmanaged sessions have no inferred sender role");
   assert.equal(json(s.dir, "inbox.json").length, 1);
   assert.deepEqual(await s.crew.handle({ op: "ack", id: "m1" }), { acked: "m1" });
   assert.deepEqual(json(s.dir, "inbox.json"), []);
@@ -236,7 +456,11 @@ test("reports are held until ready, then arrive in order; a DONE carries the git
   assert.deepEqual(d1.checks, { ok: true, notes: [] });
   assert.equal(d2.checks.ok, false);
   assert.match(d2.checks.notes[0], /^missing head, branch, tests, rc, logs$/);
-  assert.deepEqual(json(s.dir, "inbox.json").find((m: any) => m.id === "d1").checks, { ok: true, notes: [] });
+  assert.deepEqual(json(s.dir, "inbox.json").find((m: any) => m.id === "d1").checks, d1.checks);
+  const checkedFeed = readLines<any>(join(s.dir, "feed.jsonl")).find(m => m.id === "d1");
+  assert.deepEqual(checkedFeed.checks, { ...d1.checks, at: s.clock.at });
+  assert.deepEqual([checkedFeed.runId, checkedFeed.sender], [lastWorkers(s)[0]!.runId, "worker"]);
+  assert.ok(eventsOf(s, "feedset").some(e => e.feed.some(m => m.id === "d1" && m.checks?.at === s.clock.at)), "feed update carries checks and identity");
   assert.equal(lastWorkers(s)[0]!.state, "idle");
 });
 
@@ -251,6 +475,7 @@ test("a DONE left in the inbox is checked again even when it already has a resul
   first.crew.onMessage(peer(API_ID), incoming("d1", `DONE: shipped\nhead: ${head}\nbranch: feat/x\ntests: none\nrc: 0\nlogs: none`));
   await until(() => eventsOf(first, "message").length === 1, "the first DONE");
   assert.deepEqual(json(dir, "inbox.json")[0].checks, { ok: true, notes: [] });
+  assert.deepEqual(readLines<any>(join(dir, "feed.jsonl")).find(m => m.id === "d1").checks, { ok: true, notes: [], at: first.clock.at });
 
   const second = setup({ dir });
   for (const [args, out] of outputs) second.gitOut.set(args!, out!);
@@ -263,6 +488,7 @@ test("a DONE left in the inbox is checked again even when it already has a resul
   if (done.kind !== "done") throw new Error("expected DONE");
   assert.deepEqual(done.checks, { ok: false, notes: ["uncommitted changes in /w: 1 path(s)"] });
   assert.deepEqual(json(dir, "inbox.json")[0].checks, done.checks);
+  assert.deepEqual(readLines<any>(join(dir, "feed.jsonl")).find(m => m.id === "d1").checks, { ...done.checks, at: second.clock.at });
 });
 
 test("stop closes the session and marks the worker gone; a second stop forgets it", async () => {
@@ -371,4 +597,36 @@ test("a state file that is missing is empty without a fuss; worker records witho
   s.crew.ready();
   assert.deepEqual(eventsOf(s, "ready")[0]!.workers.map(w => w.name), ["api"]);
   assert.ok(!existsSync(join(dir, "workers.json.bad-1000000")), "a readable list is not set aside");
+});
+
+test("a queued DONE from a previous worker run is explicitly unverified", async () => {
+  const s = setup();
+  await s.crew.handle({ op: "spawn", name: "api", cwd: "/old" });
+  const oldRun = lastWorkers(s)[0]!.runId;
+  s.crew.onMessage(peer(API_ID), incoming("old-done", "DONE: old result"));
+  await s.crew.handle({ op: "stop", name: "api" });
+  await s.crew.handle({ op: "spawn", name: "api", cwd: "/new" });
+  assert.notEqual(lastWorkers(s)[0]!.runId, oldRun);
+  s.crew.ready();
+  await until(() => eventsOf(s, "message").length === 1, "old DONE is announced");
+  const done = eventsOf(s, "message")[0]!;
+  assert.equal(done.kind, "done");
+  if (done.kind !== "done") throw new Error("expected DONE");
+  assert.equal(done.checks?.ok, false);
+  assert.match(done.checks?.notes.join(" ") ?? "", /previous worker run/);
+});
+
+test("a send finishing after respawn cannot overwrite the new worker run", async () => {
+  let delivered!: () => void;
+  const wait = new Promise<{ delivered: boolean; id: string }>(resolve => { delivered = () => resolve({ delivered: true, id: "old-send" }); });
+  const s = setup({ deps: { client: { listSessions: async () => [], send: async () => wait, sendMessageReceipt: () => {} } } });
+  await s.crew.handle({ op: "spawn", name: "api", cwd: "/old", task: "old task" });
+  const sending = s.crew.handle({ op: "send", to: "api", text: "old message", task: "old replacement" });
+  await s.crew.handle({ op: "stop", name: "api" });
+  await s.crew.handle({ op: "spawn", name: "api", cwd: "/new", task: "new task" });
+  const newRun = lastWorkers(s)[0]!.runId;
+  delivered();
+  await sending;
+  assert.equal(json(s.dir, "workers.json")[0].runId, newRun);
+  assert.equal(json(s.dir, "workers.json")[0].task.text, "new task");
 });

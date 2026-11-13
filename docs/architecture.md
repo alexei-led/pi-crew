@@ -1,13 +1,13 @@
 # Architecture
 
-pi-crew is a Claude Code mod plus a local bridge process.
+pi-crew is a Claude Code mod plus a local bridge process. The crew pane is a read-only observer.
 It uses the installed pi-intercom client rather than a separate messaging protocol.
 
 ## Boundaries
 
 ```mermaid
 flowchart LR
-    Mod["Claude Code mod<br/>tools, band, pane"]
+    Mod["Claude Code mod<br/>lead tools, observer pane"]
     Bridge["crew-bridge<br/>one lead identity per pane"]
     Broker["pi-intercom<br/>local broker"]
     Workers["Pi workers<br/>agterm sessions"]
@@ -28,7 +28,7 @@ flowchart LR
 | Module | Responsibility |
 | --- | --- |
 | [hooks/register.tsx](../hooks/register.tsx) | Registers tools, commands, lifecycle hooks, and progress delivery on user prompts. |
-| [hooks/crew.ts](../hooks/crew.ts) | Plugin state, bridge supervision, prompt submission, acknowledgements, and pane actions. |
+| [hooks/crew.ts](../hooks/crew.ts) | Plugin state, bridge supervision, prompt submission, manager acknowledgements, and read-only history navigation. |
 | [hooks/model.ts](../hooks/model.ts) | Pure layout, ordering, text framing, and shared UI vocabulary. |
 | [hooks/band.tsx](../hooks/band.tsx), [hooks/pane.tsx](../hooks/pane.tsx) | Render the band and crew pane through the mod UI API. |
 | [bridge/crew-bridge.mts](../bridge/crew-bridge.mts) | Process entry point, Unix control socket, broker connection, timers, and shutdown. |
@@ -79,6 +79,36 @@ It stops after 20 consecutive attempts without a ready event.
 Delivery is not exactly-once. A crash between prompt submission and acknowledgement can cause a replay.
 The broker's offline mailbox is in memory. Restarting the broker loses messages not yet persisted by the bridge.
 
+## Observer and manager separation
+
+The lead still owns spawn/send/stop tools and delivery acknowledgements.
+The pane queries history and can focus an agterm terminal. Browsing never calls send, stop, read-marker, or ack.
+
+```mermaid
+flowchart LR
+    Human["Human in agent terminal"] --> Lead["Lead tools and delivery"]
+    Lead <--> Bridge["Existing bridge"]
+    Bridge --> History["Bounded run history"]
+    History --> Observer["Read-only crew pane"]
+    Observer --> View["Selection and scroll state"]
+```
+
+Worker records keep a per-spawn run id and an assignment separate from the last report.
+Spawn records its first task. A new `send.task` explicitly replaces the assignment after delivery succeeds.
+Ordinary replies leave it intact.
+
+History requests use the same control socket: worker name, run id, optional exclusive message-id cursor, and a bounded page size.
+They read the retained feed, not only the 200-message startup replay.
+Expired cursors and changed runs fail instead of silently switching conversations.
+
+New feed messages record whether the sender is the lead or worker.
+Legacy outgoing records remain unattributed: their UI label is "To worker".
+DONE feed records retain git-check results and check time. A result is evidence about that inspection, not ongoing checkout state.
+
+The mod's local view keeps the selected run, expanded text, and a bounded history page.
+Scrolling back or loading older records freezes that snapshot. Incoming reports only add observer-local newer ids until latest is selected.
+A request counter rejects stale replies from overtaken navigation.
+
 ## Stored data
 
 State lives under `PI_CREW_DIR/<pane>/`. See [settings](guide.md#settings) for its default.
@@ -88,7 +118,7 @@ New crew directories use mode `0700`. JSON state, feed files, and briefs use `06
 | --- | --- |
 | Worker records | Until forgotten. Stopped records are eligible for removal after 30 minutes. |
 | Open questions | Until the lead sends a message or the worker stops. |
-| Message feed | Latest 10 messages per worker, no older than 24 hours, after pruning. Non-crew senders share a 10-message budget. |
+| Message feed | Latest 50 messages per worker run by default, no older than 24 hours, after pruning, configurable with `PI_CREW_HISTORY_LIMIT`. The global feed is capped at 1,000 lines and compacts to 750. Non-crew senders share one configured message budget. |
 | Unacknowledged inbox | Until acknowledgement. Pending progress in the mod is capped at 50 reports. Overflow drops and acknowledges the oldest. |
 | Pending intercom asks | Entries older than one day are discarded at load. The broker can expire them earlier. |
 | Worker briefs and launchers | Remain in the crew directory, including after a worker is forgotten. |

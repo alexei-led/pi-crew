@@ -156,14 +156,46 @@ test("upgrade drops records without name, id, cwd or model", () => {
 test("parseRequest accepts each op and rejects wrong types with the field name", () => {
   const good: Array<[unknown, unknown]> = [
     [{ op: "list" }, { op: "list" }],
-    [{ op: "send", to: "a", text: "t", extra: 1 }, { op: "send", to: "a", text: "t" }],
-    [{ op: "send", to: "a", text: "", replyTo: "r" }, { op: "send", to: "a", text: "", replyTo: "r" }],
-    [{ op: "spawn", name: "n", cwd: "/", task: "t", allowDefaultBranch: true }, { op: "spawn", name: "n", cwd: "/", task: "t", allowDefaultBranch: true }],
-    [{ op: "spawn", name: "n", cwd: "/", model: "router/x", group: "g" }, { op: "spawn", name: "n", cwd: "/", model: "router/x", group: "g" }],
-    [{ op: "stop", name: "n" }, { op: "stop", name: "n" }],
-    [{ op: "read", name: "n" }, { op: "read", name: "n" }],
-    [{ op: "focus", name: "n" }, { op: "focus", name: "n" }],
-    [{ op: "ack", id: "i" }, { op: "ack", id: "i" }],
+    [
+      { op: "send", to: "a", text: "t", extra: 1 },
+      { op: "send", to: "a", text: "t" },
+    ],
+    [
+      { op: "send", to: "a", text: "", replyTo: "r", task: "new task" },
+      { op: "send", to: "a", text: "", replyTo: "r", task: "new task" },
+    ],
+    [
+      { op: "history", name: "api" },
+      { op: "history", name: "api" },
+    ],
+    [
+      { op: "history", name: "api", runId: "run-1", before: "m2", limit: 5 },
+      { op: "history", name: "api", runId: "run-1", before: "m2", limit: 5 },
+    ],
+    [
+      { op: "spawn", name: "n", cwd: "/", task: "t", allowDefaultBranch: true },
+      { op: "spawn", name: "n", cwd: "/", task: "t", allowDefaultBranch: true },
+    ],
+    [
+      { op: "spawn", name: "n", cwd: "/", model: "router/x", group: "g" },
+      { op: "spawn", name: "n", cwd: "/", model: "router/x", group: "g" },
+    ],
+    [
+      { op: "stop", name: "n" },
+      { op: "stop", name: "n" },
+    ],
+    [
+      { op: "read", name: "n" },
+      { op: "read", name: "n" },
+    ],
+    [
+      { op: "focus", name: "n" },
+      { op: "focus", name: "n" },
+    ],
+    [
+      { op: "ack", id: "i" },
+      { op: "ack", id: "i" },
+    ],
   ];
   for (const [input, parsed] of good) assert.deepEqual(parseRequest(input), parsed);
   const bad: Array<[unknown, RegExp]> = [
@@ -174,9 +206,20 @@ test("parseRequest accepts each op and rejects wrong types with the field name",
     [{ op: "send", to: "a" }, /send: "text" must be a string/],
     [{ op: "send", to: 1, text: "t" }, /send: "to" must be a string/],
     [{ op: "send", to: "a", text: "t", replyTo: 5 }, /"replyTo" must be a string/],
+    [{ op: "send", to: "a", text: "t", task: 5 }, /"task" must be a string/],
+    [{ op: "history", name: "api", runId: 5 }, /"runId" must be a string/],
+    [{ op: "history", name: "api", before: false }, /"before" must be a string/],
+    [{ op: "history", name: "api", limit: "10" }, /"limit" must be an integer from 1 to 50/],
+    [{ op: "history", name: "api", limit: 0 }, /"limit" must be an integer from 1 to 50/],
+    [{ op: "history", name: "api", limit: 1.5 }, /"limit" must be an integer from 1 to 50/],
+    [{ op: "history", name: "api", limit: 51 }, /"limit" must be an integer from 1 to 50/],
+    [{ op: "history" }, /history: "name" must be a string/],
     [{ op: "spawn", name: "n" }, /spawn: "cwd" must be a string/],
     [{ op: "spawn", name: "n", cwd: "/", task: {} }, /"task" must be a string/],
-    [{ op: "spawn", name: "n", cwd: "/", allowDefaultBranch: "yes" }, /"allowDefaultBranch" must be a boolean/],
+    [
+      { op: "spawn", name: "n", cwd: "/", allowDefaultBranch: "yes" },
+      /"allowDefaultBranch" must be a boolean/,
+    ],
     [{ op: "stop" }, /stop: "name" must be a string/],
     [{ op: "ack", id: null }, /ack: "id" must be a string/],
   ];
@@ -204,6 +247,67 @@ test("prune keeps each worker's newest messages and gives strangers one shared b
   const m = (id: string, worker?: string): Msg => ({ id, at: 0, kind: "report", text: id, peer: worker ?? id, ...(worker ? { worker } : {}) });
   const feed = [m("a1", "a"), m("b1", "b"), m("a2", "a"), m("x1"), m("a3", "a"), m("x2"), m("x3")];
   assert.deepEqual(prune(ws, feed, 0, { goneMs: 1, feedMs: 1, perWorker: 2 }).feed.map(x => x.id), ["b1", "a2", "a3", "x2", "x3"]);
+});
+
+test("prune retains separate budgets per worker run, including legacy messages", () => {
+  const worker: Worker = { ...base, runId: "new" };
+  const make = (id: string, runId?: string): Msg => ({
+    id,
+    at: 0,
+    kind: "report",
+    text: id,
+    peer: "api",
+    worker: "api",
+    ...(runId ? { runId } : {}),
+  });
+  const feed = [
+    make("legacy-1"),
+    make("old-1", "old"),
+    make("new-1", "new"),
+    make("legacy-2"),
+    make("old-2", "old"),
+    make("new-2", "new"),
+  ];
+  assert.deepEqual(
+    prune([worker], feed, 0, { goneMs: 1, feedMs: 1, perWorker: 1 }).feed.map((m) => m.id),
+    ["legacy-2", "old-2", "new-2"],
+  );
+});
+
+test("default prune retains 50 messages per worker run within the day window", () => {
+  const worker: Worker = { ...base, runId: "run-1" };
+  const feed = Array.from({ length: 55 }, (_, i): Msg => ({
+    id: `m${i + 1}`,
+    at: 0,
+    kind: "report",
+    text: "x",
+    peer: "api",
+    worker: "api",
+    runId: "run-1",
+  }));
+  const kept = prune([worker], feed, 0);
+  assert.equal(kept.feed.length, 50);
+  assert.deepEqual([kept.feed[0]!.id, kept.feed.at(-1)!.id], ["m6", "m55"]);
+});
+
+test("historyLimit accepts only decimal integers from 1 through 500", async () => {
+  const module: Record<string, unknown> = await import("../bridge/lib.mts");
+  assert.equal(typeof module.historyLimit, "function");
+  const getLimit = module.historyLimit as (env: Record<string, string | undefined>) => number;
+  for (const [raw, expected] of [
+    [undefined, 50],
+    ["", 50],
+    [" 25 ", 25],
+    ["1", 1],
+    ["500", 500],
+    ["0", 50],
+    ["501", 50],
+    ["1.5", 50],
+    ["-1", 50],
+    ["no", 50],
+    ["0x10", 50],
+  ] as const)
+    assert.equal(getLimit({ PI_CREW_HISTORY_LIMIT: raw }), expected, String(raw));
 });
 
 test("idleMs reads PI_CREW_IDLE_MIN; 0, junk and negatives turn the alert off", () => {
