@@ -1,6 +1,7 @@
 import type { Register } from 'claude-code'
 
 import type { CrewRequest } from '../types'
+import { registerClaude, startClaude } from './claude'
 import { registerBand } from './band'
 import { PLUGIN, call, connect, connected, openPane, superviseBridge, tickLoop, withProgress } from './crew'
 import { registerPane } from './pane'
@@ -72,14 +73,16 @@ const OPS: { [K in ToolOp]: (input: Omit<ToolRequest<K>, 'op'>) => ToolRequest<K
 }
 
 export const register: Register = on => {
+  registerClaude(on)
   on('session.start', async ($, e, next) => {
     const started = await next(e)
+    if (e.isInteractive) await startClaude($)
     if (!e.isInteractive || connected()) return started
 
     await connect($)
 
     for (const tool of TOOLS) await $.tool.register({ ...tool, isDeferred: false })
-    await $.command.register({ name: 'crew', description: 'Open the crew pane: the Pi workers this session leads' })
+    await $.command.register({ name: 'crew', description: 'Open the crew pane: Pi and native Claude workers this session leads' })
 
     // Both loops end when the module unloads: the engine aborts the wait they sit in.
     void superviseBridge($).catch(() => {})

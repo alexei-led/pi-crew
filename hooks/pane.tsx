@@ -1,5 +1,7 @@
 // Observer-only crew overview and bounded conversation history. The host owns the close mark and scrolling.
 import type { EngineInterface as Engine, On } from 'claude-code'
+import { pauseClaude, readClaude } from './claude'
+import { claudeRows, claudeThread } from './claude-pane'
 import type { CrewMsg, CrewView, CrewWorker } from '../types'
 import { PANE, act, expandMessage, loadHistory, openThread, pauseHistory, readCrew, setView, toggleGroup } from './crew'
 import { GLYPH, LABEL, TONE, age, clampText, clip, groups, messageSender, oneLine, tag, toneProps, workerSummary } from './model'
@@ -90,23 +92,30 @@ function thread($: Engine, c: Ctx, w?: CrewWorker) {
 
 export const registerPane = (on: On) => {
   on('ui.scroll', { requestId: PANE }, async ($, e, next) => {
-    if (e.origin.kind === 'person' && (e.by < 0 || e.offset < Math.max(0, e.contentRows - e.bodyRows))) await pauseHistory($)
+    if (e.origin.kind === 'person' && (e.by < 0 || e.offset < Math.max(0, e.contentRows - e.bodyRows))) {
+      if ((await readClaude($)).view.selected) await pauseClaude($)
+      else await pauseHistory($)
+    }
     return next(e)
   })
   return on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { view, workers, feed, now } = await readCrew($)
     const c: Ctx = { ui: $.ui.resolve(e), v: view, feed, now, cols: Math.max(1, e.props.bodyColumns) }
+    const native = await readClaude($)
+    if (native.view.selected) return claudeThread($, c.ui, native, c.cols, now)
     if (view.sel) return thread($, c, workers.find(w => w.name === view.sel))
     const { Box, Button, Text } = c.ui
     const sections = groups(workers)
     const first = sections.find(g => !view.collapsed.includes(g.name))?.workers[0]
     return <Box flexDirection="column">
       <Text bold>Crew · observer view</Text>
-      {workers.length === 0 && <Text dimColor>No workers yet. Ask the lead to delegate a task.</Text>}
+      {workers.length === 0 && native.crew.workers.length === 0 && !native.crew.error && <Text dimColor>No workers yet. Ask the lead to delegate a task.</Text>}
+      {workers.length > 0 && native.crew.workers.length > 0 && <Text bold>Pi workers</Text>}
       {sections.map(g => <Box key={'group-' + g.name} flexDirection="column">
         {sections.length > 1 && <Button plain key={'group-' + g.name} label={(view.collapsed.includes(g.name) ? '▸ ' : '▾ ') + g.name} onPress={() => toggleGroup($, g.name)} />}
         {!view.collapsed.includes(g.name) && g.workers.map(w => row($, c, w, w === first))}
       </Box>)}
+      {(native.crew.workers.length > 0 || native.crew.error) && claudeRows($, c.ui, native, c.cols, workers.length === 0)}
       <Text dimColor>Explore here. Direct agents in their terminals.</Text>
     </Box>
   })

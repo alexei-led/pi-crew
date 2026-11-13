@@ -1,10 +1,10 @@
 # pi-crew
 
-**Delegate to Pi coding agents without leaving Claude Code.**
+**Delegate to Pi agents and observe mixed Pi/Claude crews without leaving Claude Code.**
 
 Running several agents in separate terminals means watching for blockers and copying results between sessions.
 pi-crew gives Claude Code a crew of [Pi](https://github.com/badlogic/pi-mono) workers in [agterm](https://agterm.dev).
-The lead assigns tasks, answers questions, and reviews completed work. You observe assignments and conversations in a read-only crew pane. Direct the agents through their terminals.
+The lead assigns tasks, answers questions, and reviews completed work. The read-only crew pane also observes native Claude subagents and teammates in this conversation. Direct agents through their terminals; keep using Claude's native tools for Claude workers.
 
 ```mermaid
 flowchart LR
@@ -20,13 +20,14 @@ flowchart LR
 
 Questions, completed reports, and quiet-worker alerts start a lead turn.
 Routine progress waits for your next prompt or the next turn about that worker.
-Messages travel through the local [pi-intercom](https://github.com/nicobailon/pi-intercom) broker.
+Pi messages travel through the local [pi-intercom](https://github.com/nicobailon/pi-intercom) broker.
+Native Claude workers are observed through Claude's mod API, independently of that broker. Their recent messages and turn reports appear alongside Pi workers; conversation snapshots are available when the host permits them. See [native Claude workers](docs/guide.md#native-claude-workers) for limits.
 
 ## Install
 
 You need:
 
-- Claude Code with **mod support**, running inside agterm with `agtermctl` on `PATH`.
+- Claude Code with **mod support and native agent APIs** (tested on 2.1.323), running inside agterm with `agtermctl` on `PATH`.
 - Pi with pi-intercom and its sibling `tsx` package installed. The default location is `~/.pi/agent/npm/node_modules/`.
 - A Pi executable and an available model. The defaults, `pi-work` and `router/openai-work`, require your own setup.
 

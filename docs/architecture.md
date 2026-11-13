@@ -1,7 +1,8 @@
 # Architecture
 
 pi-crew is a Claude Code mod plus a local bridge process. The crew pane is a read-only observer.
-It uses the installed pi-intercom client rather than a separate messaging protocol.
+The Pi transport uses the installed pi-intercom client rather than a separate messaging protocol.
+Native Claude observation uses the host's mod API inside the mod, independently of the bridge. The diagram below shows the Pi transport path.
 
 ## Boundaries
 
@@ -29,6 +30,8 @@ flowchart LR
 | --- | --- |
 | [hooks/register.tsx](../hooks/register.tsx) | Registers tools, commands, lifecycle hooks, and progress delivery on user prompts. |
 | [hooks/crew.ts](../hooks/crew.ts) | Plugin state, bridge supervision, prompt submission, manager acknowledgements, and read-only history navigation. |
+| [hooks/claude.ts](../hooks/claude.ts) | Conversation-scoped native roster, lifecycle/message observation and explicit conversation snapshots; no manager delivery. |
+| [hooks/claude-pane.tsx](../hooks/claude-pane.tsx) | Read-only native worker rows and threads in the shared pane. |
 | [hooks/model.ts](../hooks/model.ts) | Pure layout, ordering, text framing, and shared UI vocabulary. |
 | [hooks/band.tsx](../hooks/band.tsx), [hooks/pane.tsx](../hooks/pane.tsx) | Render the band and crew pane through the mod UI API. |
 | [bridge/crew-bridge.mts](../bridge/crew-bridge.mts) | Process entry point, Unix control socket, broker connection, timers, and shutdown. |
@@ -109,9 +112,32 @@ The mod's local view keeps the selected run, expanded text, and a bounded histor
 Scrolling back or loading older records freezes that snapshot. Incoming reports only add observer-local newer ids until latest is selected.
 A request counter rejects stale replies from overtaken navigation.
 
+## Native Claude observation
+
+Native records and view state use separate mod atoms. They never become bridge workers, Pi feed messages, held progress or delivery acknowledgements.
+The pane combines the two sources only when rendering. Native observation requires no broker connection.
+
+Successful spawns record identity, initial assignment and resolved model even before the asynchronous roster publishes the worker.
+The host roster reconciles every five seconds; unchanged rosters do not rewrite observer state.
+Agent IDs identify loops, teammate addresses identify team members, and display names resolve only when unique.
+Confirmed replacement spawns increment a generation. Resumed turns preserve the generation and initial assignment.
+Turn reports use turn IDs; identical message text is not deduplicated.
+
+Successful `session.send` calls observe main-to-worker and worker-to-main communication.
+The receive hook observes external teammate mailbox deliveries only when the harness marks them unverified.
+This avoids duplicating in-process sends. It does not promise complete worker-to-worker traffic or recovery of unobserved sends.
+The pane labels unverified sender claims and queued delivery without claiming a read receipt.
+
+A conversation ID change hides old state immediately and resets it on reconciliation. Async reads reject stale owners, generations and navigation requests.
+A conversation snapshot is an explicit agent-scoped API read; a denial never falls back to the main conversation.
+Snapshot rows contain visible text and tool names only. No private transcript/inbox files are parsed and no native UI view is switched.
+Reading or expanding content never sends messages, injects prompts, alters tasks, or acknowledges manager deliveries.
+
 ## Stored data
 
 State lives under `PI_CREW_DIR/<pane>/`. See [settings](guide.md#settings) for its default.
+Native observations live in mod state, scoped to the Claude conversation: at most 100 worker records, 50 messages per generation and 200 messages globally. Feed records expire after 24 hours; absent workers expire 30 minutes after their last observed activity. Assignment, message and snapshot text is bounded to 16,000 characters plus a truncation marker. Pinned view/snapshot content stays until navigation or conversation reset. These are recent observations, not an archive.
+
 New crew directories use mode `0700`. JSON state, feed files, and briefs use `0600`. Launch scripts use `0700`.
 
 | Data | Retention or bound |

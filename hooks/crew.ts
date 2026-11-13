@@ -3,6 +3,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface as Engine, PromptSubmitInput, PromptSubmitResult } from 'claude-code'
 
 import type { BridgeEvent, CrewInbound, CrewMsg, CrewRequest, CrewView, CrewWorker } from '../types'
+import { closeClaude, readClaude, refreshClaude } from './claude'
 import { HISTORY_PAGE_SIZE, isHistory, mergeMessages, observeMessage, progressText, startsTurn, turnText } from './model'
 
 export const PLUGIN = 'pi-crew'
@@ -219,7 +220,7 @@ export async function superviseBridge($: Engine) {
 export async function tickLoop($: Engine) {
   for (;;) {
     await $.clock.sleep(TICK_MS)
-    if ((await read($, workers)).length > 0) await update($, tick, t => t + 1)
+    if ((await read($, workers)).length > 0 || (await readClaude($)).crew.workers.length > 0) await update($, tick, t => t + 1)
   }
 }
 
@@ -258,11 +259,14 @@ export function showPane($: Engine) {
 
 /** Browsing is independent of manager delivery: no read marker or ack is sent here. */
 export async function openThread($: Engine, w: CrewWorker) {
+  await closeClaude($)
   await setView($, { sel: w.name, runId: w.runId, history: undefined, loading: false, arriving: [], error: undefined, expanded: [], following: true, newer: [] })
   await loadHistory($)
 }
 
 export async function openPane($: Engine, w?: CrewWorker) {
+  await closeClaude($)
+  await refreshClaude($)
   await setView($, { sel: undefined, history: undefined, loading: false, arriving: [], error: undefined, newer: [], expanded: [], following: true })
   if (w) await openThread($, w)
   await showPane($)

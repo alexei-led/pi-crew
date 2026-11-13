@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.7.0]
+
+### Summary
+
+Observe native Claude workers alongside Pi workers in the read-only crew pane.
+
+### Changes
+
+- Separate Pi and Claude roster sections, even when workers share a name. Native rows preserve Claude's statuses and distinguish missing agents from confirmed termination.
+- Show observed Claude assignments, lead/worker messages and final turn reports without changing either manager's delivery.
+- Read an explicit, bounded conversation snapshot through the host API. Tool names are visible; thinking, tool arguments and outputs are not copied into the snapshot.
+- Preserve pinned reading, isolate replacement spawns and conversation changes, and retain recent observations across plugin reloads.
+- Keep Claude observation independent of the Pi broker. No private Claude files are parsed and no new Pi extension is required.
+
+### Upgrade
+
+Use a mod-capable Claude Code build with native agent APIs (tested on 2.1.323) and reload the plugin after updating. Keep using native Claude tools for Claude workers; pi-crew tools still manage Pi workers only.
+Native observation is not a complete archive. Full pane-hosted conversations are unavailable through the host API, and mailbox sender claims remain unverified.
+Existing Pi worker records and delivery behavior are unchanged.
+
+[Compare v0.6.0...v0.7.0](https://github.com/alexei-led/pi-crew/compare/v0.6.0...v0.7.0)
+
 ## [0.6.0]
 
 ### Summary
