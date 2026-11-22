@@ -18,7 +18,6 @@ function world(on: On) {
   })
   mock.clock(on)
   on('session.id', () => ({ value: 'conversation-1' }))
-  on('agent.list', () => ({ value: [native] }))
   return values
 }
 test('the observer shows Pi and native Claude workers with the same name separately', async ($, on) => {

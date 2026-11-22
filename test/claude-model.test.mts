@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { ClaudeCrew, ClaudeMsg, ClaudeStatus, ClaudeView, ClaudeWorker } from '../types/index.d.ts'
-import { claudeLabel, claudeMessage, claudeRoster, claudeText, observeClaude, observerBand, resolveClaude } from '../hooks/model.ts'
+import { claudeLabel, claudeMessage, claudeRoster, claudeText, observeClaude, resolveClaude } from '../hooks/model.ts'
 
 const worker = (id: string, more: Partial<ClaudeWorker> = {}): ClaudeWorker => ({ id, generation: 1, description: 'Review', type: 'general-purpose', status: 'running', present: true, startedAt: 0, lastAt: 0, ...more })
 const msg = (i: number, more: Partial<ClaudeMsg> = {}): ClaudeMsg => ({ id: String(i), worker: 'a', generation: 1, at: i, text: 'identical message', kind: 'message', sender: 'worker', ...more })
@@ -57,10 +57,4 @@ test('native thread snapshots reject other owners, agents and generations and st
   const arrived = observeClaude(pinned, 'lead', msg(2))
   assert.deepEqual(arrived.messages, pinned.messages)
   assert.deepEqual(observeClaude(arrived, 'lead', msg(2)).newer, ['2'])
-})
-
-test('mixed band includes native-only crews and fits narrow widths', () => {
-  const native = [worker('a'), worker('b', { status: 'completed' })]
-  assert.match(observerBand([], 100, native), /crew 1 · Pi 0 · Claude 2/)
-  for (const width of [0, 1, 15, 40]) assert.ok(observerBand([], width, native).length <= width)
 })

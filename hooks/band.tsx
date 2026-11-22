@@ -1,20 +1,17 @@
-// A read-only status summary. The lead, not the observer, handles worker messages.
+// Exceptional delivery state only. No questions, reports, or routine counts belong in this strip.
 import type { On } from 'claude-code'
-import { readClaude } from './claude'
-import { openPane, readCrew } from './crew'
-import { observerBand } from './model'
+import { openPane, readDelivery } from './crew'
+import { clip, deliveryWarning } from './model'
 
 export const registerBand = (on: On) =>
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const { workers } = await readCrew($)
-    const native = (await readClaude($)).crew.workers
-    if (e.props.hasSurvey || (workers.length === 0 && native.length === 0)) return next(e)
+    const label = deliveryWarning(await readDelivery($))
+    if (e.props.hasSurvey || !label || e.props.bodyColumns < 1) return next(e)
     const below = await next(e)
     const { Box, Button, Text } = $.ui.resolve(e)
-    const hotkey = e.props.bodyColumns >= 3 ? 'c' : undefined
-    const label = observerBand(workers, Math.max(0, e.props.bodyColumns - (hotkey ? 3 : 0)), native)
+    const hotkey = e.props.bodyColumns > 3
     return <Box flexDirection="column">
-      {hotkey ? <Button plain hotkey={hotkey} key="crew" label={label} onPress={() => openPane($)} /> : <Text>{label}</Text>}
+      {hotkey ? <Button plain hotkey="c" key="crew" label={clip(label, e.props.bodyColumns - 3)} onPress={() => openPane($)} /> : <Text>{clip(label, e.props.bodyColumns)}</Text>}
       {below}
     </Box>
   })

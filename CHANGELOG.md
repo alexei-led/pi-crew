@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.8.0]
+
+### Summary
+
+Worker reports recover from dropped submissions and failed acknowledgements without a plugin reload. The prompt area stays quiet unless delivery is degraded.
+
+### Changes
+
+- Keep report order within each worker run. A slow DONE check or a retry does not block other runs.
+- Retry dropped or failed submissions automatically. Retry failed acknowledgements without submitting the same accepted report again.
+- Deliver bounded progress digests. Count omitted updates and acknowledge them only after the lead accepts the digest.
+- Show bridge health, pending acknowledgements, and questions waiting on the lead in `/crew`. The `list` tool also reports delivery health. The prompt strip never shows message text.
+
+### Upgrade
+
+Run `/reload-plugins` or restart Claude Code after updating. Keep using pi-intercom 0.18.1; this release does not require a broker protocol upgrade.
+
+[Compare v0.7.0...v0.8.0](https://github.com/alexei-led/pi-crew/compare/v0.7.0...v0.8.0)
+
 ## [0.7.0]
 
 ### Summary

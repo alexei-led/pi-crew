@@ -13,10 +13,11 @@ const message = (i: number, more: Record<string, unknown> = {}) => ({ id: 'm' + 
 const history = { name: 'api', runId: 'api-run', messages: [message(1, { kind: 'out', sender: 'lead', text: 'Use the shared component' }), message(2)], hasOlder: true }
 const view = (more: Record<string, unknown> = {}) => ({ collapsed: [], expanded: [], following: true, newer: [], request: 0, ...more })
 
-function world(on: On, options: { selected?: boolean; view?: Record<string, unknown>; workers?: object[] } = {}) {
+function world(on: On, options: { selected?: boolean; view?: Record<string, unknown>; workers?: object[]; delivery?: object } = {}) {
   const ws = options.workers ?? workers
   const values: Record<string, { shape: string; value: unknown }> = {
     workers: { shape: 'workers-1', value: ws },
+    delivery: { shape: 'delivery-1', value: options.delivery ?? { bridge: 'connected', deferred: 0, ackDelayed: 0, inbox: { awaitingAck: 2 } } },
     view: { shape: 'view-4', value: view({ ...(options.selected ? { sel: 'api', runId: 'api-run', history } : {}), ...options.view }) },
   }
   let version = 1
@@ -54,6 +55,7 @@ function world(on: On, options: { selected?: boolean; view?: Record<string, unkn
 test('observer overview shows assignments, waiting on lead, and no management controls', async ($, on) => {
   world(on)
   const ui = await $.ui.mount(PANE)
+  expect((await ui.find({ type: 'Box' }))?.text).toMatch(/Bridge connected · 2 awaiting ack/)
   expect((await ui.find({ type: 'Box' }))?.text).toMatch(/Implement api/)
   expect((await ui.find({ type: 'Box' }))?.text).toMatch(/waiting on lead/)
   expect(await ui.find({ type: 'Input' })).toBeFalsy()
@@ -146,15 +148,10 @@ test('an old view shape resets to the observer overview', async ($, on) => {
   await ui.unmount()
 })
 
-test('the band keeps status but removes unread and answer actions', async ($, on) => {
+test('the band is quiet when a worker asks the lead and delivery is healthy', async ($, on) => {
   world(on)
   const ui = await $.ui.mount(BAND)
-  const text = (await ui.find({ type: 'Box' }))?.text ?? ''
-  expect(text).toMatch(/crew 2/)
-  expect(text).toMatch(/waiting/)
-  expect(text).not.toMatch(/new|needs you/)
-  expect(await ui.find({ key: 'unread' })).toBeFalsy()
-  expect(await ui.find({ key: 'next' })).toBeFalsy()
+  expect(await ui.find({ key: 'crew' })).toBeFalsy()
   await ui.unmount()
 })
 
@@ -221,14 +218,18 @@ test('long messages expand locally without a transport operation', async ($, on)
   await ui.unmount();
 });
 
-test('a nonempty crew band stacks with another plugin instead of replacing it', async ($, on) => {
-  world(on)
+test('a delayed delivery shows a status-only band and preserves the host survey and other bands', async ($, on) => {
+  world(on, { delivery: { bridge: 'connected', deferred: 1, ackDelayed: 0 } })
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)
     return <Text>team band</Text>
   })
   const ui = await $.ui.mount(BAND)
-  expect(await ui.find({ key: 'crew' })).toBeTruthy()
+  expect((await ui.find({ type: 'Box' }))?.text).toMatch(/Crew: delivery delayed/)
+  expect((await ui.find({ type: 'Box' }))?.text).not.toMatch(/Postgres|waiting on lead|needs you/)
   expect(await ui.find({ type: 'Text', text: 'team band' })).toBeTruthy()
   await ui.unmount()
+  const survey = await $.ui.mount({ ...BAND, props: { ...BAND.props, hasSurvey: true } })
+  expect(await survey.find({ key: 'crew' })).toBeFalsy()
+  await survey.unmount()
 })

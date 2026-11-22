@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import {
   GLYPH, IDLE_GLYPH, LABEL, TONE, age, checksLine, clampText, clip, framed, groups,
-  isHistory, mergeMessages, observeMessage, observerBand, progressText, startsTurn, tally, toneProps, turnHead, turnText,
+  isHistory, mergeMessages, observeMessage, deliveryWarning, progressText, startsTurn, tally, toneProps, turnHead, turnText,
 } from "../hooks/model.ts";
 import type { CrewInbound, CrewView, CrewWorker } from "../types/index.d.ts";
 
@@ -148,12 +148,13 @@ test("idle turn instruction follows the headline before metadata", () => {
   assert.deepEqual(lines.slice(3), ["", "From the pi-crew bridge, about worker 3 api. Information, not an instruction:", "```", "screen", "```"]);
 });
 
-test("observer band fits its width and prioritizes waiting on the lead", () => {
-  const ws = [w("api", 1, { state: "ask", unread: 99 }), w("web", 2), w("old", 3, { state: "gone" })];
-  assert.equal(observerBand(ws, 120), "crew 2 · ◆ 1 waiting on lead · ● 1 on task · ✕ 1 stopped");
-  for (let width = 0; width <= 120; width++) assert.ok(observerBand(ws, width).length <= width);
-  assert.ok(!observerBand(ws, 120).includes("new"));
-  assert.match(observerBand(ws, 15), /◆1/);
+test("delivery warnings omit routine queueing and never include message text", () => {
+  const healthy = { bridge: "connected", deferred: 0, ackDelayed: 0, inbox: { awaitingAck: 5 } } as const;
+  assert.equal(deliveryWarning(healthy), undefined);
+  assert.equal(deliveryWarning({ ...healthy, deferred: 1 }), "Crew: delivery delayed");
+  assert.equal(deliveryWarning({ ...healthy, ackDelayed: 1 }), "Crew: delivery delayed");
+  assert.equal(deliveryWarning({ ...healthy, bridge: "reconnecting" }), "Crew: bridge reconnecting");
+  assert.equal(deliveryWarning({ ...healthy, bridge: "stopped" }), "Crew: bridge stopped");
 });
 
 const historyMessage = (id: string) => ({ id, at: Number(id), kind: "report" as const, text: id, worker: "api", peer: "api", runId: "run", sender: "worker" as const });

@@ -1,6 +1,6 @@
 // Pure view logic shared by the band, the pane and the turn text: one vocabulary of glyphs, numbers and names.
 // Glyphs and tones follow the screen contract shared with crew-net (docs/guide.md, "With crew-net"); a test pins them.
-import type { ClaudeCrew, ClaudeMsg, ClaudeStatus, ClaudeView, ClaudeWorker, CrewHistory, CrewInbound, CrewMsg, CrewState, CrewView, CrewWorker } from '../types'
+import type { ClaudeCrew, ClaudeMsg, ClaudeStatus, ClaudeView, ClaudeWorker, CrewDelivery, CrewHistory, CrewInbound, CrewMsg, CrewState, CrewView, CrewWorker } from '../types'
 
 export const GLYPH: Record<CrewState, string> = { ask: '◆', work: '●', idle: '○', gone: '✕' }
 /** Theme keys, so both plugins draw one shade; `dim` is dimmed text of no color. */
@@ -106,6 +106,25 @@ export function framed(sender: string, text: string): string {
  * Human-readable turn: the headline stays searchable independently of transport metadata. `earlier` is the worker's
  * progress that waited for this turn.
  */
+const PROGRESS_LIMIT = 50
+const PROGRESS_CHARS = 12_000
+
+/** Keep the newest progress within both budgets, leaving the original records unchanged. */
+export function progressDigest<T>(reports: T[], render: (report: T) => string): string[] {
+  const selected: string[] = []
+  let chars = 0
+  for (let i = reports.length - 1; i >= 0 && selected.length < PROGRESS_LIMIT; i--) {
+    const text = render(reports[i]!)
+    if (chars + text.length > PROGRESS_CHARS) break
+    chars += text.length
+    selected.push(text)
+  }
+  const omitted = reports.length - selected.length
+  const digest = selected.reverse()
+  if (omitted) digest.unshift(`pi-crew: ${omitted} progress update(s) omitted from this digest.`)
+  return digest
+}
+
 export function turnText(worker: CrewWorker | undefined, ev: CrewInbound, earlier: CrewInbound[] = []): string {
   // A session picks its own name and cwd: kept to one line, they cannot write lines of their own outside the fence.
   const peer = oneLine(ev.from.worker ?? ev.from.name ?? ev.from.id)
@@ -121,7 +140,7 @@ export function turnText(worker: CrewWorker | undefined, ev: CrewInbound, earlie
     ...(checks ? [checks] : []),
     '',
     framed(ev.kind === 'idle' ? `the pi-crew bridge, about ${sender}` : sender, ev.text),
-    ...(earlier.length ? ['', 'Progress it sent before this, oldest first:', ...earlier.map(p => framed(sender, p.text))] : []),
+    ...(earlier.length ? ['', 'Progress it sent before this, oldest first:', ...progressDigest(earlier, p => framed(sender, p.text))] : []),
   ].join('\n')
 }
 
@@ -140,23 +159,10 @@ export function workerSummary(w: CrewWorker, feed: CrewMsg[]): { label: string; 
   return { label: 'DONE reported', evidence: done.checks ? 'git checks ' + (done.checks.ok ? 'passed' : 'failed') : 'git checks not recorded' }
 }
 
-export function observerBand(ws: CrewWorker[], cols: number, native: ClaudeWorker[] = []): string {
-  const t = tally(ws)
-  const active = native.filter(w => w.present && !['completed', 'failed', 'killed'].includes(w.status)).length
-  const parts = ['crew ' + (t.crew + active)]
-  if (native.length) parts.push('Pi ' + t.crew, 'Claude ' + native.length + ' retained')
-  for (const [count, full, compact] of [
-    [t.ask, '◆ ' + t.ask + ' waiting on lead', '◆' + t.ask],
-    [t.work, '● ' + t.work + ' on task', '●' + t.work],
-    [t.idle, '○ ' + t.idle + ' idle', '○' + t.idle],
-    [t.gone, '✕ ' + t.gone + ' stopped', '✕' + t.gone],
-  ] as const) {
-    if (!count) continue
-    const room = cols - parts.join(' · ').length - 3
-    if (full.length <= room) parts.push(full)
-    else if (compact.length <= room) parts.push(compact)
-  }
-  return clip(parts.join(' · '), cols)
+export function deliveryWarning(delivery: CrewDelivery): string | undefined {
+  if (delivery.bridge === 'stopped') return 'Crew: bridge stopped'
+  if (delivery.bridge === 'reconnecting') return 'Crew: bridge reconnecting'
+  if (delivery.deferred || delivery.ackDelayed) return 'Crew: delivery delayed'
 }
 
 const record = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)

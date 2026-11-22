@@ -11,7 +11,7 @@ flowchart LR
     You -->|Delegate a task| Lead["Claude Code<br/>lead + pi-crew"]
     Lead -->|Tasks and answers| Workers["Pi workers<br/>separate agterm sessions"]
     Workers -->|Questions and DONE reports| Lead
-    Lead --- Pane["/crew<br/>status and messages"]
+    Lead --- Pane["/crew<br/>blockers and delivery status"]
     classDef core fill:#ecfdf5,stroke:#059669,color:#064e3b
     classDef ext fill:#eef2ff,stroke:#6366f1,color:#1e1b4b
     class Lead,Pane core
@@ -54,7 +54,7 @@ Ask Claude Code:
 
 > Create a worktree for a Pi worker named `api`. Have it add a health endpoint, run the relevant tests, commit its changes, and report back.
 
-Each worker opens in a separate agterm session. Use `/crew` to explore its recent conversation. Ask the lead to answer questions or redirect work.
+Each worker opens in a separate agterm session. Ask the lead to answer questions or redirect work. You can open `/crew` to check delivery health or explore a worker’s recent conversation, but you do not need it for messages to arrive.
 
 **Workers are not sandboxed.** Use one worktree per editing worker and review its diff before merging.
 DONE checks compare reports with git state. They do not prove that tests ran or that the work is correct.

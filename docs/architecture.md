@@ -66,16 +66,17 @@ A respawn under the same name gets a new display number while retaining its dete
 ## Delivery and recovery
 
 1. The bridge persists an incoming report before sending its broker receipt.
-2. It announces reports in order, after DONE verification, and only after the initial crew snapshot.
-3. The mod holds progress. A question, DONE, quiet alert, or non-crew message starts a prompt submission.
-4. After submission succeeds, the mod acknowledges the report and the bridge removes it from the inbox.
+2. After the initial crew snapshot, it announces reports in order within each sender and run. DONE verification does not block other runs.
+3. The mod holds progress. A question, DONE, quiet alert, or non-crew message starts a prompt submission. Reports for the same sender and run are processed in order; retrying one sender does not block another.
+4. After the host accepts a report or digest, the mod records its IDs and queues acknowledgements. The bridge removes a report from its inbox on ack. If that call fails, the mod retries the ack without submitting the report again.
 
 The agterm pane id determines the lead identity. Reload, clear, and resume in the same pane reuse it.
 A restarted bridge replays unacknowledged reports and rechecks DONE claims.
 The mod keeps recent seen ids to suppress duplicate delivery after reloads.
 
-Dropped prompt submissions get up to 10 attempts, 15 seconds apart.
-A report that still fails remains unacknowledged for replay.
+Dropped or failed prompt submissions retry every 15 seconds while the mod is running. After three failures the strip reports a delivery delay. The mod serializes host submissions, not the delay between attempts. A bridge replay of an in-flight ID does not enqueue a second submission.
+
+The read-only strip, `/crew`, and `list` show transport health. The bridge reports count and oldest known arrival time for reports awaiting ack. This is not a count of unread turns. The mod separately reports repeated submission failures and failed acks.
 The mod retries bridge exits with exponential backoff, up to 30 seconds between starts.
 It stops after 20 consecutive attempts without a ready event.
 
@@ -145,7 +146,7 @@ New crew directories use mode `0700`. JSON state, feed files, and briefs use `06
 | Worker records | Until forgotten. Stopped records are eligible for removal after 30 minutes. |
 | Open questions | Until the lead sends a message or the worker stops. |
 | Message feed | Latest 50 messages per worker run by default, no older than 24 hours, after pruning, configurable with `PI_CREW_HISTORY_LIMIT`. The global feed is capped at 1,000 lines and compacts to 750. Non-crew senders share one configured message budget. |
-| Unacknowledged inbox | Until acknowledgement. Pending progress in the mod is capped at 50 reports. Overflow drops and acknowledges the oldest. |
+| Unacknowledged inbox | Until acknowledgement. Progress stays pending until the lead accepts a digest in a related report or user prompt. The digest includes up to 50 reports and 12,000 characters of rendered report text. It counts omitted updates explicitly. Full text is subject to feed retention. |
 | Pending intercom asks | Entries older than one day are discarded at load. The broker can expire them earlier. |
 | Worker briefs and launchers | Remain in the crew directory, including after a worker is forgotten. |
 | Other inactive crew directories | Removed at bridge startup after seven days without a change. |

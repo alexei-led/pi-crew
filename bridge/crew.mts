@@ -132,7 +132,23 @@ export function createCrew(dir: string, deps: CrewDeps) {
     writeJson(workersFile, [...workers.values()]);
     emit({ type: "workers", workers: [...workers.values()] });
   };
-  const saveInbox = () => writeJson(join(dir, "inbox.json"), [...inbox.values()]);
+  const inboxSummary = () => {
+    let oldestAt: number | undefined;
+    for (const { receivedAt } of inbox.values()) {
+      if (receivedAt !== undefined && (oldestAt === undefined || receivedAt < oldestAt)) oldestAt = receivedAt;
+    }
+    return { awaitingAck: inbox.size, ...(oldestAt === undefined ? {} : { oldestAt }) };
+  };
+  const inboxFile = join(dir, "inbox.json");
+  const saveInbox = () => writeJson(inboxFile, [...inbox.values()]);
+  const publishInbox = () => emit({ type: "inbox", inbox: inboxSummary() });
+  const storeIncoming = (event: Inbound) => {
+    const stored = { ...event, receivedAt: now() };
+    writeJson(inboxFile, [...inbox.values(), stored]);
+    inbox.set(stored.id, stored);
+    publishInbox();
+    return stored;
+  };
   const saveAsks = () => writeJson(join(dir, "asks.json"), Object.fromEntries(pendingAsks));
   const workerName = (id: string) => [...workers.values()].find(w => w.id === id)?.name;
   const noteLive = (s: SessionInfo) => liveSessions.set(s.id, trackLive(liveSessions.get(s.id), s, now()));
@@ -178,11 +194,10 @@ export function createCrew(dir: string, deps: CrewDeps) {
     rosterTimer.unref();
   };
 
-  // A message reaches the lead in arrival order, after a DONE's git checks. It is stored and receipted first, so a
-  // slow check never runs into the broker's receipt timeout, and a restart replays it with the checks redone.
-  // Held until `ready` is out, so the mod knows the crew before the first report.
+  // Preserve order within a run. A slow DONE check must not stall another worker's question.
   let start!: () => void;
-  let announcing = new Promise<void>(resolve => (start = resolve));
+  const ready = new Promise<void>(resolve => (start = resolve));
+  const announcing = new Map<string, Promise<unknown>>();
   const updateFeedChecks = (id: string, checks: NonNullable<Msg["checks"]>) => {
     const feed = readLines<Msg>(feedFile);
     const index = feed.findIndex(msg => msg.id === id);
@@ -211,12 +226,23 @@ export function createCrew(dir: string, deps: CrewDeps) {
     return checked;
   };
   const announce = (event: Inbound) => {
-    announcing = announcing.then(() => withChecks(event)).then(emit).catch(reportError("announce"));
+    const key = `${event.from.id}:${event.runId ?? ""}`;
+    const next = (announcing.get(key) ?? ready).then(async () => {
+      let checked = event;
+      try {
+        checked = await withChecks(event);
+      } catch (error) {
+        reportError("DONE checks")(error);
+        if (event.kind === "done") checked = { ...event, checks: { ok: false, notes: ["git checks could not finish"] } };
+      }
+      emit(checked);
+    }).catch(reportError("announce")).finally(() => {
+      if (announcing.get(key) === next) announcing.delete(key);
+    });
+    announcing.set(key, next);
   };
   const persist = (event: Inbound) => {
-    inbox.set(event.id, event);
-    saveInbox();
-    announce(event);
+    announce(storeIncoming(event));
   };
 
   /** A new message from a session: store it, feed it, update the worker it belongs to, and tell the lead. */
@@ -234,8 +260,7 @@ export function createCrew(dir: string, deps: CrewDeps) {
       kind,
       text: message.content.text,
     };
-    inbox.set(message.id, event);
-    saveInbox();
+    const stored = storeIncoming(event);
     if (event.expectsReply) {
       pendingAsks.set(message.id, now());
       saveAsks();
@@ -250,7 +275,7 @@ export function createCrew(dir: string, deps: CrewDeps) {
       workers.set(w.name, applyIn(w, msg));
       saveWorkers();
     }
-    announce(event);
+    announce(stored);
   };
 
   const onMessage = (from: Peer, message: Incoming) => {
@@ -339,6 +364,7 @@ export function createCrew(dir: string, deps: CrewDeps) {
       };
     };
     return {
+      delivery: inboxSummary(),
       crew: [...workers.values()].sort((a, b) => a.n - b.n).map(row),
       sessions: sessions.filter(s => s.id !== lead.id).map(s => ({
         id: s.id, name: s.name, status: s.status, cwd: s.cwd, worker: workerName(s.id),
@@ -421,7 +447,11 @@ export function createCrew(dir: string, deps: CrewDeps) {
   /** The lead has the message. What it has is not new: a worker's unread never exceeds its messages still in the inbox. */
   const ack = (req: Extract<Request, { op: "ack" }>) => {
     const from = inbox.get(req.id)?.from.worker;
-    if (inbox.delete(req.id)) saveInbox();
+    if (inbox.has(req.id)) {
+      writeJson(inboxFile, [...inbox.values()].filter(event => event.id !== req.id));
+      inbox.delete(req.id);
+      publishInbox();
+    }
     const w = from ? workers.get(from) : undefined;
     if (w && w.unread > waitingFrom(w.name)) {
       workers.set(w.name, { ...w, unread: waitingFrom(w.name) });
@@ -580,6 +610,7 @@ export function createCrew(dir: string, deps: CrewDeps) {
         type: "ready", lead, agtermSession: deps.agtermSession ?? null,
         workers: [...workers.values()], feed: readLines<Msg>(feedFile, FEED_REPLAY),
       });
+      publishInbox();
       start();
       publishRoster();
     },
