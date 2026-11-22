@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pi-crew 0.8 · Reliable messaging</title>
+<style>
+  :root { color-scheme: dark; --bg:#101419; --panel:#181e25; --terminal:#11161c; --line:#35414c; --ink:#f1f4f7; --muted:#afbecd; --accent:#9bf0cf; --amber:#ffcf91; --blue:#b7ceff; --mono:ui-monospace,SFMono-Regular,Consolas,monospace; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:1rem/1.55 system-ui,sans-serif; }
+  main { width:min(72rem, 100% - 2rem); margin:auto; padding:3rem 0; }
+  h1,h2,h3,p { margin:0; }
+  h1 { font-size:clamp(2.75rem,8vw,5.5rem); line-height:1; letter-spacing:-.07em; font-weight:720; }
+  h2 { font-size:clamp(1.7rem,4vw,2.5rem); line-height:1.1; letter-spacing:-.045em; }
+  h3 { font-size:1.15rem; line-height:1.25; }
+  p,ul,ol { margin-block:.55rem 0; }
+  a { color:var(--accent); text-underline-offset:.19em; }
+  code,kbd { font-family:var(--mono); }
+  small,.muted { color:var(--muted); }
+  .eyebrow { color:var(--accent); font:700 .78rem/1.5 var(--mono); text-transform:uppercase; letter-spacing:.12em; }
+  .lede { font-size:clamp(1rem,2.5vw,1.25rem); max-width:52ch; color:var(--muted); }
+  header { display:grid; gap:.75rem; }
+  nav,.controls { display:flex; flex-wrap:wrap; gap:.5rem; align-items:center; }
+  nav { gap:1.15rem; }
+  section { margin-top:3.2rem; padding-top:1.4rem; border-top:1px solid var(--line); scroll-margin-top:1rem; }
+  section > h2 { margin-top:.25rem; }
+  fieldset { border:0; padding:0; margin:1.05rem 0; min-inline-size:0; }
+  legend { font-weight:650; margin-bottom:.5rem; }
+  .chip,.controls button { display:inline-flex; align-items:center; gap:.35rem; color:var(--ink); padding:.35rem .65rem; border:1px solid var(--line); border-radius:.4rem; background:var(--terminal); font:inherit; cursor:pointer; }
+  .chip:has(input:checked) { border-color:var(--accent); color:var(--accent); }
+  input { accent-color:var(--accent); }
+  :focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+  button[aria-disabled="true"] { color:var(--muted); cursor:default; }
+  .comparison,.grid-2,.topology { display:grid; gap:.8rem; }
+  .option,.card,.replay { background:var(--panel); border:1px solid var(--line); border-radius:.7rem; padding:1rem; min-width:0; }
+  .option.best { border-color:#548d7b; }
+  .option h3,.card h3 { margin-top:.3rem; }
+  .option > p:not(.eyebrow) { min-height:3.1em; color:var(--muted); }
+  .terminal { background:var(--terminal); border:1px solid var(--line); border-radius:.45rem; overflow:hidden; margin-top:.8rem; font:.84rem/1.5 var(--mono); }
+  .term-surface { color:var(--muted); border-bottom:1px solid var(--line); }
+  .term-surface,.strip,.prompt,.footer { padding:.38rem .65rem; }
+  .strip { color:var(--accent); border-bottom:1px solid var(--line); }
+  .strip.alert { color:var(--amber); }
+  .prompt { color:var(--ink); padding-block:.75rem; }
+  .footer { border-top:1px solid var(--line); color:var(--muted); }
+  details { border:1px solid var(--line); border-radius:.45rem; background:var(--terminal); margin:.55rem 0; padding:.55rem .65rem; }
+  summary { cursor:pointer; color:var(--ink); font-weight:650; }
+  details details { margin-bottom:0; }
+  .attention { color:var(--amber); }
+  .status { min-height:1.55em; color:var(--blue); }
+  .grid-2 { margin-top:1rem; }
+  .topology { margin:1.1rem 0; padding:0; list-style:none; }
+  .topology li { position:relative; border:1px solid var(--line); background:var(--terminal); padding:.65rem; border-radius:.45rem; }
+  .topology li:not(:last-child)::after { content:"↓"; color:var(--muted); position:absolute; top:100%; line-height:1; left:50%; }
+  .topology strong,.topology small { display:block; }
+  .topology li[data-active] { border-color:var(--accent); }
+  .replay { margin-top:1.1rem; }
+  .replay .controls { margin:.65rem 0; }
+  .lanes { margin:.75rem 0; display:grid; grid-template-columns:minmax(0,1fr); gap:.45rem; }
+  .lanes > div { display:grid; grid-template-columns:5rem minmax(0,1fr); gap:.6rem; background:var(--terminal); border-radius:.4rem; padding:.5rem .65rem; }
+  dt { font:700 .88rem/1.5 var(--mono); color:var(--accent); }
+  dd { margin:0; }
+  .step-log { padding-left:1.6rem; }
+  .step-log li { padding:.3rem .45rem; color:var(--muted); border-left:2px solid transparent; }
+  .step-log li[aria-current="step"] { color:var(--ink); border-color:var(--accent); background:var(--terminal); }
+  .pulse { animation:arrival .55s ease-out; }
+  @keyframes arrival { from { background-color:#2e554c; } to { background-color:var(--terminal); } }
+  @media(prefers-reduced-motion:reduce) { .pulse { animation:none; } }
+  .flow { font: .87rem/1.6 var(--mono); color:var(--accent); }
+  .contracts { padding-left:1.15rem; }
+  .contracts li + li { margin-top:.45rem; }
+  @media(min-width:62rem) {
+    .comparison { grid-template-columns:repeat(3,minmax(0,1fr)); }
+  }
+  @media(min-width:52rem) {
+    .grid-2 { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .topology { grid-template-columns:repeat(4,minmax(0,1fr)); gap:1.3rem; }
+    .topology li:not(:last-child)::after { content:"→"; left:calc(100% + .15rem); top:calc(50% - .5em); }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="eyebrow">pi-crew / 0.8 design proposal</div>
+    <h1>Reliable messaging</h1>
+    <p class="lede">Let agents coordinate without the operator watching their conversation. Show only what’s worth looking at.</p>
+    <nav aria-label="Page sections"><a href="#options">Compare UI options</a><a href="#diagnostics">Open-on-demand diagnostics</a><a href="#architecture">Walk through recovery</a></nav>
+    <small>Interactive mockups · simulated data · no plugin changes</small>
+  </header>
+
+  <section id="options" aria-labelledby="options-title">
+    <div class="eyebrow">01 / Terminal options</div>
+    <h2 id="options-title">How much should the terminal show?</h2>
+    <p class="muted">Change the scenario to see the same crew state across all three options. None puts message text above the prompt or status bar.</p>
+    <noscript><p class="attention">Enable JavaScript to switch scenarios or play the recovery sequence. The default examples and written sequence are shown below.</p></noscript>
+    <fieldset>
+      <legend>Simulate crew state</legend>
+      <div class="controls" id="scenarios">
+        <label class="chip"><input type="radio" name="scenario" value="healthy" checked> All healthy</label>
+        <label class="chip"><input type="radio" name="scenario" value="busy"> Lead busy</label>
+        <label class="chip"><input type="radio" name="scenario" value="reconnect"> Bridge reconnecting</label>
+        <label class="chip"><input type="radio" name="scenario" value="operator"> Operator needed</label>
+      </div>
+    </fieldset>
+    <div class="comparison">
+      <article class="option">
+        <p class="eyebrow">A / Always visible</p>
+        <h3>Stats strip</h3>
+        <p>See active workers and nonzero counts at a glance. Costs a line even on a healthy crew.</p>
+        <div class="terminal">
+          <div class="term-surface">Claude Code · transcript</div>
+          <div class="strip" id="strip-a">Crew: 3 active</div>
+          <div class="prompt">❯ <span class="muted">Ask the lead…</span></div>
+          <div class="footer">host status bar</div>
+        </div>
+      </article>
+      <article class="option best">
+        <p class="eyebrow">B / Recommended</p>
+        <h3>Exceptions only</h3>
+        <p>Show one line for operator input or degraded delivery. Routine queuing stays invisible.</p>
+        <div class="terminal">
+          <div class="term-surface">Claude Code · transcript</div>
+          <div class="strip" id="strip-b" hidden></div>
+          <div class="prompt">❯ <span class="muted">Ask the lead…</span></div>
+          <div class="footer">host status bar</div>
+        </div>
+      </article>
+      <article class="option">
+        <p class="eyebrow">C / No strip</p>
+        <h3>Command only</h3>
+        <p>Never reserve a line. Inspect state via <code>/crew</code>; put serious-failure notices in the host transcript, not the footer.</p>
+        <div class="terminal">
+          <div class="term-surface">Claude Code · transcript</div>
+          <div class="prompt">❯ <span class="muted">Ask the lead…</span></div>
+          <div class="footer">host status bar</div>
+        </div>
+      </article>
+    </div>
+    <p class="status" id="scenario-status" role="status">All healthy. No pending deliveries and no operator action.</p>
+    <p class="muted">“Needs you” means the lead explicitly escalated to the operator. A worker question alone never counts. A delivery becomes degraded after a retry budget or timeout, not just because the lead is busy. Before implementing, locate the reported message in live Claude Code: the current <code>AbovePrompt</code> hook already renders counts.</p>
+  </section>
+
+  <section id="diagnostics" aria-labelledby="diagnostics-title">
+    <div class="eyebrow">02 / On demand</div>
+    <h2 id="diagnostics-title">Make <code>/crew</code> answer “what’s stuck?”</h2>
+    <div class="grid-2">
+      <article class="card">
+        <p class="eyebrow">Read-only mockup</p>
+        <h3><code>/crew</code> · Delivery and blockers</h3>
+        <p id="diag-bridge">Bridge connected · 0 pending delivery</p>
+        <p id="diag-blocker">No blockers.</p>
+        <details>
+          <summary>Workers and last activity</summary>
+          <p id="diag-worker">api · working · last report 18s ago</p>
+          <p id="diag-docs">docs · working · last report 36s ago</p>
+          <p>tests · working · last report 54s ago</p>
+          <details>
+            <summary>Recent retained conversation · sample</summary>
+            <p><strong>api → lead:</strong> Contract tests are passing locally.</p>
+            <p><strong>lead → api:</strong> Check the retry path before reporting DONE.</p>
+          </details>
+        </details>
+      </article>
+      <article class="card">
+        <p class="eyebrow">Tool-first</p>
+        <h3>The lead gets the same status via <code>list</code></h3>
+        <ul class="contracts">
+          <li><strong>Pending delivery:</strong> stored by the bridge, not yet accepted into a lead turn. Include oldest age and last known failure class.</li>
+          <li><strong>Waiting on lead:</strong> an open worker question. It may already have reached the lead.</li>
+          <li><strong>Needs you:</strong> an explicit request for operator input, not an inferred worker state. If the host can’t provide a reliable signal, omit this count.</li>
+        </ul>
+        <p class="muted">Browsing doesn’t send, reply, or acknowledge. Native Claude agents continue to use their own tools and delivery path.</p>
+      </article>
+    </div>
+  </section>
+
+  <section id="architecture" aria-labelledby="architecture-title">
+    <div class="eyebrow">03 / Proposed architecture</div>
+    <h2 id="architecture-title">A bridge restart shouldn’t require a human</h2>
+    <p class="muted">Keep the existing transport and processes. Change how the bridge tracks delivery and how the mod schedules it.</p>
+    <div class="grid-2">
+      <div class="card"><p class="eyebrow">Today / shared queue</p><p class="flow">api Q: retry sleep → docs DONE: stuck behind it</p></div>
+      <div class="card"><p class="eyebrow">Proposed / eligible runs</p><p class="flow">api Q: deferred · docs DONE: eligible to submit</p></div>
+    </div>
+    <ol class="topology" id="topology" aria-label="Proposed message path">
+      <li><strong>Pi → pi-intercom</strong><small>Existing local transport</small></li>
+      <li><strong>Bridge inbox</strong><small>Persist by message ID before receipt</small></li>
+      <li><strong>Mod delivery pump</strong><small>Schedule eligible reports by worker run</small></li>
+      <li><strong>Lead turn</strong><small>Accept first, then acknowledge</small></li>
+    </ol>
+    <p class="muted"><code>list</code> and the UI read a shared delivery summary. They don’t drive the queue.</p>
+    <div class="replay" aria-labelledby="replay-title">
+      <p class="eyebrow">Recovery simulation</p>
+      <h3 id="replay-title">Two workers, one blocked submission, one restart</h3>
+      <div class="controls" id="replay-controls">
+        <button type="button" id="back">Back</button>
+        <button type="button" id="next">Next step</button>
+        <button type="button" id="play">Play</button>
+        <button type="button" id="reset">Reset</button>
+      </div>
+      <p class="status" id="stage" role="status">Step 1 of 5 · Report stored</p>
+      <dl class="lanes">
+        <div><dt>api</dt><dd id="lane-api">Question stored; receipt sent</dd></div>
+        <div><dt>docs</dt><dd id="lane-docs">Working</dd></div>
+        <div><dt>bridge</dt><dd id="lane-bridge">1 pending</dd></div>
+        <div><dt>lead</dt><dd id="lane-lead">Busy with another turn</dd></div>
+      </dl>
+      <details open>
+        <summary>Read the sequence</summary>
+        <ol class="step-log" id="sequence">
+          <li aria-current="step"><strong>Report stored.</strong> The bridge stores api’s question before it sends a transport receipt.</li>
+          <li><strong>Submission deferred.</strong> The host drops this submission while the lead is busy. Keep the report in the inbox and schedule a retry without sleeping inside the dispatcher.</li>
+          <li><strong>Bridge restarts.</strong> It replays api’s pending question and receives docs’ DONE. Replay of a pending ID updates the existing queue item; it doesn’t enqueue another turn.</li>
+          <li><strong>Another run makes progress.</strong> The lead is now available. api is still in retry backoff, so docs’ DONE can submit once its git checks finish. The bridge removes it after ack.</li>
+          <li><strong>Question accepted.</strong> api’s retry becomes due and the host is ready again. The host accepts the lead turn and the bridge clears pending delivery. The question is still open until the lead replies.</li>
+        </ol>
+      </details>
+    </div>
+    <div class="grid-2">
+      <article class="card">
+        <p class="eyebrow">Ownership and contracts</p>
+        <h3>Keep delivery separate from display</h3>
+        <ul class="contracts">
+          <li><strong>Bridge:</strong> Own durable inbox and replay. Key reports by message ID and group them by worker identity and run ID. DONE checks must not hold unrelated runs behind a global FIFO.</li>
+          <li><strong>Mod:</strong> Own scheduling and host prompt submission. Take one eligible run head at a time in arrival order across eligible runs. A dropped or failed submission defers that head, not the dispatcher. Wake on new work or when a retry is due, without relying on an unverified host readiness hook.</li>
+          <li><strong>Progress:</strong> Bundle preceding progress with that run’s next important report or offer it on the next user prompt. Bound each digest and show how many updates were omitted. Only acknowledge the included or explicitly counted IDs once the host accepts it. Full text stays subject to normal history retention.</li>
+          <li><strong>Tools and UI:</strong> Read queue/health snapshots and distinguish unknown state during disconnect from an empty queue. Browsing cannot change delivery state.</li>
+        </ul>
+      </article>
+      <article class="card">
+        <p class="eyebrow">Failure boundary and acceptance</p>
+        <h3>Make recovery testable</h3>
+        <ul class="contracts">
+          <li><strong>Not exactly-once:</strong> Record accepted IDs before acknowledging so ordinary replay can retry ack without another turn. Without host idempotency, a crash between prompt acceptance and recording that acceptance can still duplicate a turn.</li>
+          <li><strong>Not durable until receipt:</strong> A broker restart can lose reports that haven’t reached the bridge. Don’t treat a queued send as proof of storage.</li>
+          <li><strong>Release gate:</strong> Exercise a busy lead, a bridge restart, a thrown submission, and a failed ack. Verify per-run order, progress overflow counts, and recovery without <code>/crew</code> or plugin reload. Opening the pane must not alter delivery.</li>
+        </ul>
+        <p class="muted">Baseline: <a href="https://github.com/alexei-led/pi-crew/blob/v0.7.0/docs/architecture.md#delivery-and-recovery">0.7 delivery design</a>. The diagrams above show proposals, not shipped behavior.</p>
+      </article>
+    </div>
+  </section>
+</main>
+<script>
+  (() => {
+    const byId = id => document.getElementById(id);
+    const scenarios = {
+      healthy: {
+        strip: 'Crew: 3 active', summary: 'All healthy. No pending deliveries and no operator action.',
+        bridge: 'Bridge connected · 0 pending delivery', blocker: 'No blockers.',
+        api: 'api · working · last report 18s ago', docs: 'docs · working · last report 36s ago',
+      },
+      busy: {
+        strip: 'Crew: 3 active · 2 pending', summary: 'Lead busy. Two reports are stored; neither needs the operator.',
+        bridge: 'Bridge connected · 2 pending delivery · oldest 12s', blocker: 'api question and docs DONE waiting for a lead turn.',
+        api: 'api · question stored · 12s ago', docs: 'docs · DONE stored · 4s ago',
+      },
+      reconnect: {
+        strip: 'Crew: reconnecting', exception: 'Crew: reconnecting',
+        summary: 'Bridge reconnecting. Pending counts are unknown, not zero.',
+        bridge: 'Bridge reconnecting · pending count unknown', blocker: 'Last known: 2 pending delivery. Automatic reconnect in progress.',
+        api: 'api · last known: question stored', docs: 'docs · last known: DONE stored',
+      },
+      operator: {
+        strip: 'Crew: 2 active · 1 needs you', exception: 'Crew: 1 needs you',
+        summary: 'Lead escalated a decision. The worker question was already delivered.',
+        bridge: 'Bridge connected · 0 pending delivery', blocker: '1 operator decision · look for the lead’s request in the transcript.',
+        api: 'api · waiting for a decision · question accepted by lead', docs: 'docs · DONE accepted by lead',
+      },
+    };
+    byId('scenarios').addEventListener('change', event => {
+      const state = scenarios[event.target.value];
+      if (!state) return;
+      byId('strip-a').textContent = state.strip;
+      byId('strip-a').classList.toggle('alert', Boolean(state.exception));
+      byId('strip-b').textContent = state.exception ?? '';
+      byId('strip-b').hidden = !state.exception;
+      byId('strip-b').classList.toggle('alert', Boolean(state.exception));
+      byId('scenario-status').textContent = state.summary;
+      byId('diag-bridge').textContent = state.bridge;
+      byId('diag-blocker').textContent = state.blocker;
+      byId('diag-blocker').classList.toggle('attention', Boolean(state.exception));
+      byId('diag-worker').textContent = state.api;
+      byId('diag-docs').textContent = state.docs;
+    });
+
+    const frames = [
+      ['Report stored', 'Question stored; receipt sent', 'Working', '1 pending', 'Busy with another turn', 1],
+      ['Submission deferred', 'Question deferred until retry is due', 'Working', '1 pending', 'Busy; submission dropped', 2],
+      ['Bridge restarts', 'Same question ID replayed', 'DONE stored; git checks pending', '2 pending after reconnect', 'Delivery pump resumes', 1],
+      ['Another run makes progress', 'Still in retry backoff', 'DONE accepted and acknowledged', '1 pending', 'Accepted docs’ report', 3],
+      ['Question accepted', 'Question accepted; answer still open', 'DONE accepted and acknowledged', '0 pending', 'Accepted api’s question', 3],
+    ];
+    const nodes = [...byId('topology').children];
+    const steps = [...byId('sequence').children];
+    let frame = 0;
+    let timer;
+    function stop() {
+      clearInterval(timer);
+      timer = undefined;
+      byId('play').textContent = 'Play';
+    }
+    function draw(motion = true) {
+      const [label, api, docs, bridge, lead, active] = frames[frame];
+      byId('stage').textContent = 'Step ' + (frame + 1) + ' of ' + frames.length + ' · ' + label;
+      Object.entries({ api, docs, bridge, lead }).forEach(([key, value]) => {
+        byId('lane-' + key).textContent = value;
+      });
+      steps.forEach((step, i) => i === frame ? step.setAttribute('aria-current', 'step') : step.removeAttribute('aria-current'));
+      nodes.forEach((node, i) => {
+        node.toggleAttribute('data-active', i === active);
+        node.classList.remove('pulse');
+      });
+      if (motion) {
+        void nodes[active].offsetWidth;
+        nodes[active].classList.add('pulse');
+      }
+      byId('back').setAttribute('aria-disabled', frame === 0);
+      byId('next').setAttribute('aria-disabled', frame === frames.length - 1);
+    }
+    byId('replay-controls').addEventListener('click', ({ target }) => {
+      if (target.getAttribute('aria-disabled') === 'true') return;
+      if (target.id === 'play') {
+        if (timer !== undefined) return stop();
+        if (frame === frames.length - 1) frame = 0;
+        byId('play').textContent = 'Pause';
+        draw();
+        timer = setInterval(() => {
+          frame++;
+          draw();
+          if (frame === frames.length - 1) stop();
+        }, 2000);
+        return;
+      }
+      if (target.id === 'next' || target.id === 'back' || target.id === 'reset') {
+        stop();
+        frame = target.id === 'reset' ? 0 : frame + (target.id === 'next' ? 1 : -1);
+        draw();
+      }
+    });
+    draw(false);
+  })();
+</script>
+</body>
+</html>

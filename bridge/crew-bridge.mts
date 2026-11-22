@@ -129,7 +129,14 @@ async function serve(key: string, leadName: string) {
       if (!conn.destroyed) conn.end(`${JSON.stringify(reply)}\n`);
     });
   });
-  server.listen(sock, () => chmodSync(sock, 0o600));
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(sock, () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  chmodSync(sock, 0o600);
 
   const shutdown = async (code: number) => {
     server.close();
@@ -167,6 +174,7 @@ function call(key: string, request: string): Promise<number> {
   return new Promise(resolve => {
     const conn = createConnection(controlPath(key));
     conn.setEncoding("utf8");
+    conn.setTimeout(REQUEST_IDLE_MS, () => conn.destroy(new Error("control request timed out")));
     let out = "";
     conn.on("connect", () => conn.write(`${request.replace(/\n/g, " ")}\n`));
     conn.on("data", (chunk: string) => (out += chunk));

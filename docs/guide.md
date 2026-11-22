@@ -12,23 +12,11 @@ Open `/crew` to see the grouped worker list, recorded assignments, and recent ac
 Select a worker to explore its conversation or open its terminal.
 The host places the pane beside the transcript when there is room, otherwise above the prompt.
 
-Example band:
+The prompt area stays quiet during normal work. It shows a short crew status only while the bridge reconnects or stops, or when report submission or acknowledgement keeps failing. It never shows worker message text. If a host survey is open, it takes priority.
 
-```text
-c: crew 3 · ◆ 1 waiting on lead · ● 1 on task · ○ 1 idle
-```
+`/crew` shows bridge health, reports still awaiting acknowledgement, and questions waiting on the lead. A question is **not** a request for the operator. If the lead needs you to decide, it asks in the main conversation. The inbox count is unknown while the bridge is disconnected.
 
-| Marker | Meaning |
-| --- | --- |
-| `◆` | Waiting on the lead, not on the observer. |
-| `●` | Has an assigned task. This does not prove live execution. |
-| `○` | Idle: no task yet, or DONE reported. |
-| `✕` | Stopped. |
-| `◇` | Quiet alert delivered to the lead, not a worker state. |
-
-Zero counts hide. Narrow layouts shorten labels or omit secondary counts.
-The band has one navigation action: `c` opens Crew while the band is focused (`ctrl+x tab`).
-There is no observer unread counter or message inbox.
+Worker markers: `◆` waiting on the lead, `●` assigned a task, `○` idle, `✕` stopped. The quiet alert (`◇`) is sent to the lead, not shown in the strip.
 
 ## Explore a Pi conversation
 
@@ -64,7 +52,7 @@ The host owns the close mark. Closing the pane does not stop any worker.
 
 The overview separates **Pi workers** and **Claude workers**, including workers with the same display name.
 Native workers are this conversation's subagents and teammates, discovered through Claude's mod API.
-The roster refreshes every five seconds. The band's Claude count includes recent retained workers, not only active ones.
+The roster refreshes every five seconds. Native Claude delivery does not affect the Pi bridge warning.
 Native observation continues if the Pi bridge is unavailable.
 
 Select a Claude row to see its observed initial assignment, lead/worker messages and final turn reports.
@@ -150,7 +138,7 @@ Tasks typed directly into a worker terminal do not update the crew's assignment 
 | --- | --- |
 | `mcp__pi-crew__spawn` | `{name, cwd, task?, group?, model?, allowDefaultBranch?}`. Starts a worker in agterm. |
 | `mcp__pi-crew__send` | `{to, text, replyTo?, task?}`. Sends instructions or an answer. Use `task` only for a new assignment. |
-| `mcp__pi-crew__list` | Crew state, waiting questions, manager unread counts, live presence/context when available, and intercom sessions. |
+| `mcp__pi-crew__list` | Crew state, waiting questions, live sessions, and delivery health. `delivery.awaitingAck` counts stored reports that the bridge has not acknowledged, including accepted reports whose ack is retrying. `leadDelivery` reports bridge state, runs with repeated submission failures, and failed acks awaiting retry. |
 | `mcp__pi-crew__stop` | `{name}`. Closes a worker session. A second stop forgets it. |
 
 Targets can be worker names, full session ids, case-insensitive live session names, or unique id prefixes of 6+ characters.

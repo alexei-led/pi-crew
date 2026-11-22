@@ -12,18 +12,25 @@ const USER = { origin: { kind: 'composer' }, wait: false } as const
 
 function world(on: On, events: object[], workers: object[] = [api]) {
   const values: Record<string, { shape: string; value: unknown }> = {}
-  let version = 1
-  on('state.get', (_, e) => ({ value: { value: values[(e as { key: string }).key], version } }))
+  const versions: Record<string, number> = {}
+  on('state.get', (_, e) => ({ value: { value: values[e.key], version: versions[e.key] ?? 0 } }))
   on('state.set', (_, e) => {
-    const event = e as { key: string; value: { shape: string; value: unknown } }
-    values[event.key] = event.value
-    return { value: { isSet: true, version: ++version } }
+    const version = versions[e.key] ?? 0
+    if (e.ifVersion !== undefined && e.ifVersion !== version) return { value: { isSet: false, version } }
+    values[e.key] = e.value as { shape: string; value: unknown }
+    return { value: { isSet: true, version: versions[e.key] = version + 1 } }
   })
   const clock = mock.clock(on)
   const acks: string[] = []
   const turns: string[] = []
   const prompts: Array<readonly string[] | undefined> = []
   let refusal: string | undefined
+  let failure = false
+  let blockedText: string | undefined
+  let ackBlocked = false
+  let restart = false
+  let starts = 0
+  let waitForUser: (() => Promise<void>) | undefined
   on('session.id', () => ({ value: 'conversation-1' }))
   on('agent.list', () => ({ value: [] }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -32,24 +39,32 @@ function world(on: On, events: object[], workers: object[] = [api]) {
   on('process.run', (_, e) => {
     if (e.argv[0] === 'sh') return ran('pane-1')
     const request = JSON.parse(e.argv.at(-1) ?? '{}') as { op: string; id: string }
-    if (request.op === 'ack') acks.push(request.id)
+    if (request.op === 'ack') {
+      if (ackBlocked) return ran('{"ok":false,"error":"bridge unavailable"}')
+      acks.push(request.id)
+    }
     return ran('{"ok":true}')
   })
   on('process.spawn', async function* () {
     const ready = { type: 'ready', lead: { name: 'lead', id: 'lead-id' }, agtermSession: 's', workers, feed: [] }
     yield { stream: 'stdout' as const, text: [ready, ...events].map(e => `${JSON.stringify(e)}\n`).join('') }
     // A bridge runs for the session's life; one that exited would be restarted and replay its events.
-    await clock.sleep(86_400_000)
+    await clock.sleep(restart && starts++ === 0 ? 500 : 86_400_000)
     return { value: { code: 0, signal: null } }
   })
-  on('prompt.submit', (_, e) => {
+  on('prompt.submit', async (_, e) => {
+    if (blockedText && e.text.includes(blockedText)) return { drop: 'busy' }
+    if (failure) throw new Error('host unavailable')
     if (refusal) return { drop: refusal }
     if (e.origin.kind === 'plugin' && e.origin.name === 'pi-crew') turns.push(e.text)
-    else prompts.push(e.context)
+    else {
+      prompts.push(e.context)
+      await waitForUser?.()
+    }
     return { text: e.text, context: e.context }
   })
   const held = () => ((values.held?.value ?? []) as Array<{ id: string }>).map(m => m.id)
-  return { clock, acks, turns, prompts, held, tick: () => values.tick?.value, refuse: (reason?: string) => { refusal = reason } }
+  return { clock, acks, turns, prompts, held, tick: () => values.tick?.value, refuse: (reason?: string) => { refusal = reason }, fail: (value: boolean) => { failure = value }, block: (text?: string) => { blockedText = text }, blockAck: (value: boolean) => { ackBlocked = value }, restartOnce: () => { restart = true }, delivery: () => values.delivery?.value, pauseUser: (wait: () => Promise<void>) => { waitForUser = wait } }
 }
 
 async function lead($: Engine, w: ReturnType<typeof world>) {
@@ -74,6 +89,7 @@ test("progress waits, un-acked, for the user's prompt and rides it once as conte
   await $.prompt.submit({ text: 'what now?', ...USER })
   expect(w.prompts[0]?.length).toBe(1)
   expect(w.prompts[0]?.[0]).toMatch(/^pi-crew: reports your workers sent since the last turn\..*\n\n● Worker 1 api reports\n.*```\nstep 1\n```\n\n● Worker 1 api reports\n.*```\nstep 2\n```$/s)
+  await w.clock.settle()
   expect([w.acks, w.held()]).toEqual([['p1', 'p2'], []])
   await $.prompt.submit({ text: 'and now?', ...USER })
   expect(w.prompts).toEqual([w.prompts[0], undefined])
@@ -98,6 +114,30 @@ test('a turn that cannot start puts the progress back to wait and carries it on 
   expect([w.acks, w.held()]).toEqual([['p1', 'd1'], []])
 })
 
+test('a deferred report does not block another worker', async ($, on) => {
+  const second = { ...from('done', 'd2', 'DONE: docs'), from: { id: 'docs-id', name: 'docs', cwd: '/w', worker: 'docs' } }
+  const w = world(on, [from('ask', 'q1', 'api question?'), second], [api, { ...api, name: 'docs', id: 'docs-id', n: 2 }])
+  w.block('api question?')
+  await lead($, w)
+  expect(w.turns.length).toBe(1)
+  expect(w.turns[0]).toMatch(/docs/)
+  expect(w.acks).toEqual(['d2'])
+  w.block()
+  await w.clock.advance(15_000)
+  expect(w.acks).toEqual(['d2', 'q1'])
+})
+
+test('a submission exception retries without losing the pending report', async ($, on) => {
+  const w = world(on, [from('report', 'p1', 'step 1'), from('done', 'd1', 'DONE: shipped')])
+  w.fail(true)
+  await lead($, w)
+  expect([w.turns, w.acks, w.held()]).toEqual([[], [], ['p1']])
+  w.fail(false)
+  await w.clock.advance(15_000)
+  expect(w.turns.length).toBe(1)
+  expect([w.acks, w.held()]).toEqual([['p1', 'd1'], []])
+})
+
 test("a refused prompt and another plugin's prompt leave the progress waiting", async ($, on) => {
   const w = world(on, [from('report', 'p1', 'step 1')])
   await lead($, w)
@@ -110,17 +150,81 @@ test("a refused prompt and another plugin's prompt leave the progress waiting", 
   expect([w.prompts[1]?.length, w.acks, w.held()]).toEqual([1, ['p1'], []])
 })
 
-test('a report the lead already has is acked again and not delivered twice', async ($, on) => {
+test('duplicate in-flight reports do not submit or acknowledge twice', async ($, on) => {
   const w = world(on, [from('done', 'd1', 'DONE: shipped'), from('done', 'd1', 'DONE: shipped'), from('idle', 'i1', 'idle on intercom for 12m')])
   await lead($, w)
   expect(w.turns.map(t => t.split('\n')[0])).toEqual(['○ Worker 1 api reports done', '◇ Worker 1 api went quiet without a report'])
-  expect(w.acks).toEqual(['d1', 'd1', 'i1'])
+  expect(w.acks).toEqual(['d1', 'i1'])
 })
 
-test('past 50 waiting reports the oldest is dropped and acked, so it is not replayed for ever', async ($, on) => {
+test('progress overflow is counted and acked only after the digest is accepted', async ($, on) => {
   const w = world(on, Array.from({ length: 51 }, (_, i) => from('report', `p${i}`, `step ${i}`)))
   await lead($, w)
-  expect([w.held().length, w.held()[0], w.acks]).toEqual([50, 'p1', ['p0']])
+  expect([w.held().length, w.acks]).toEqual([51, []])
+  w.refuse('busy')
+  await $.prompt.submit({ text: 'update?', ...USER })
+  expect([w.held().length, w.acks]).toEqual([51, []])
+  w.refuse()
+  await $.prompt.submit({ text: 'update?', ...USER })
+  await w.clock.settle()
+  expect(w.prompts[0]?.[0]).toMatch(/1 progress update\(s\) omitted/)
+  expect(w.prompts[0]?.[0]).not.toMatch(/\nstep 0\n/)
+  expect([w.held(), w.acks.length]).toEqual([[], 51])
+})
+
+test('replay while a run is deferred preserves run order; retry continues past the old limit', async ($, on) => {
+  const w = world(on, [from('ask', 'q1', 'api question?'), from('done', 'd1', 'DONE: shipped')])
+  w.restartOnce()
+  w.block('api question?')
+  await lead($, w)
+  await w.clock.advance(1_500)
+  for (let i = 0; i < 11; i++) await w.clock.advance(15_000)
+  expect(w.turns).toEqual([])
+  expect(w.delivery()).toMatchObject({ bridge: 'connected', deferred: 1 })
+  w.block()
+  await w.clock.advance(15_000)
+  expect(w.acks).toEqual(['q1', 'd1'])
+  expect(w.turns.length).toBe(2)
+  expect(w.delivery()).toMatchObject({ deferred: 0 })
+})
+
+test('replay cannot expose progress already claimed by a submitting user prompt', async ($, on) => {
+  const w = world(on, [from('report', 'p1', 'step 1')])
+  w.restartOnce()
+  let release!: () => void
+  let entered!: () => void
+  const hold = new Promise<void>(resolve => { release = resolve })
+  const reached = new Promise<void>(resolve => { entered = resolve })
+  w.pauseUser(() => { entered(); return hold })
+  await lead($, w)
+  const submission = $.prompt.submit({ text: 'update?', ...USER })
+  await reached
+  try {
+    await w.clock.advance(1_500)
+    expect(w.acks).toEqual([])
+    expect(w.held()).toEqual([])
+  } finally {
+    release()
+  }
+  await submission
+  await w.clock.settle()
+  expect(w.acks).toEqual(['p1'])
+})
+
+test('failed ack retries after reconnect without resubmitting an accepted turn', async ($, on) => {
+  const w = world(on, [from('ask', 'q1', 'api question?')])
+  w.restartOnce()
+  w.blockAck(true)
+  await lead($, w)
+  expect(w.turns.length).toBe(1)
+  expect(w.acks).toEqual([])
+  expect(w.delivery()).toMatchObject({ ackDelayed: 1 })
+  await w.clock.advance(1_500)
+  w.blockAck(false)
+  await w.clock.advance(15_000)
+  expect(w.turns.length).toBe(1)
+  expect(w.acks).toEqual(['q1'])
+  expect(w.delivery()).toMatchObject({ bridge: 'connected', ackDelayed: 0 })
 })
 
 test('ages redraw each minute while any worker is listed, a stopped one too', async ($, on) => {

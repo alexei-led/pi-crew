@@ -464,6 +464,35 @@ test("reports are held until ready, then arrive in order; a DONE carries the git
   assert.equal(lastWorkers(s)[0]!.state, "idle");
 });
 
+test("slow DONE checks preserve run order without delaying another sender", async () => {
+  let finish!: () => void;
+  const gate = new Promise<void>(resolve => { finish = resolve; });
+  const s = setup({ deps: { git: async (_cwd, args) => {
+    if (args.join(" ") === "rev-parse HEAD") await gate;
+    return undefined;
+  } } });
+  await s.crew.handle({ op: "spawn", name: "api", cwd: "/w" });
+  s.crew.ready();
+  const head = "a".repeat(40);
+  s.crew.onMessage(peer(API_ID), incoming("done", `DONE: shipped\nhead: ${head}\nbranch: feat/x\ntests: bin/test\nrc: 0\nlogs: none`));
+  s.crew.onMessage(peer(API_ID), incoming("same", "Q: same worker?"));
+  s.clock.at += 5_000;
+  s.crew.onMessage(peer("other"), incoming("other", "Q: another sender?"));
+  try {
+    await until(() => eventsOf(s, "message").some(e => e.id === "other"), "other sender question");
+    assert.deepEqual(eventsOf(s, "message").map(e => e.id), ["other"]);
+    assert.deepEqual(await s.crew.handle({ op: "list" }).then(result => "delivery" in result && result.delivery),
+      { awaitingAck: 3, oldestAt: 1_000_000 });
+  } finally {
+    finish();
+  }
+  await until(() => eventsOf(s, "message").length === 3, "remaining reports");
+  assert.deepEqual(eventsOf(s, "message").map(e => e.id), ["other", "done", "same"]);
+  await s.crew.handle({ op: "ack", id: "done" });
+  await s.crew.handle({ op: "ack", id: "same" });
+  assert.deepEqual(eventsOf(s, "inbox").at(-1)?.inbox, { awaitingAck: 1, oldestAt: 1_005_000 });
+});
+
 test("a DONE left in the inbox is checked again even when it already has a result", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-crew-unit-"));
   const first = setup({ dir });

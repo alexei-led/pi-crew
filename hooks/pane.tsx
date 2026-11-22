@@ -4,7 +4,7 @@ import { pauseClaude, readClaude } from './claude'
 import { claudeRows, claudeThread } from './claude-pane'
 import type { CrewMsg, CrewView, CrewWorker } from '../types'
 import { PANE, act, expandMessage, loadHistory, openThread, pauseHistory, readCrew, setView, toggleGroup } from './crew'
-import { GLYPH, LABEL, TONE, age, clampText, clip, groups, messageSender, oneLine, tag, toneProps, workerSummary } from './model'
+import { GLYPH, LABEL, TONE, age, clampText, clip, deliveryWarning, groups, messageSender, oneLine, tag, tally, toneProps, workerSummary } from './model'
 
 type Ctx = {
   ui: ReturnType<Engine['ui']['resolve']>
@@ -99,7 +99,7 @@ export const registerPane = (on: On) => {
     return next(e)
   })
   return on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { view, workers, feed, now } = await readCrew($)
+    const { view, workers, feed, now, delivery } = await readCrew($)
     const c: Ctx = { ui: $.ui.resolve(e), v: view, feed, now, cols: Math.max(1, e.props.bodyColumns) }
     const native = await readClaude($)
     if (native.view.selected) return claudeThread($, c.ui, native, c.cols, now)
@@ -107,8 +107,18 @@ export const registerPane = (on: On) => {
     const { Box, Button, Text } = c.ui
     const sections = groups(workers)
     const first = sections.find(g => !view.collapsed.includes(g.name))?.workers[0]
+    const warning = deliveryWarning(delivery)
+    const inbox = delivery.bridge === 'connected' ? delivery.inbox : undefined
+    const { ask } = tally(workers)
     return <Box flexDirection="column">
-      <Text bold>Crew · observer view</Text>
+      <Text bold>Crew · delivery and blockers</Text>
+      <Text {...toneProps(warning ? 'warning' : undefined)}>{clip(
+        (warning ?? 'Bridge ' + delivery.bridge) + (inbox ? ' · ' + inbox.awaitingAck + ' awaiting ack' : ' · inbox unknown'), c.cols)}</Text>
+      {!!inbox?.awaitingAck && inbox.oldestAt !== undefined && <Text dimColor>{'Oldest stored report: ' + age(inbox.oldestAt, now)}</Text>}
+      {delivery.bridge === 'stopped' && <Text color="warning">Run /reload-plugins to retry the bridge.</Text>}
+      {delivery.deferred > 0 && <Text color="warning">{delivery.deferred + ' run(s) retrying submission'}</Text>}
+      {delivery.ackDelayed > 0 && <Text color="warning">{delivery.ackDelayed + ' ack(s) retrying'}</Text>}
+      {ask > 0 && <Text color="warning">{ask + ' waiting on lead'}</Text>}
       {workers.length === 0 && native.crew.workers.length === 0 && !native.crew.error && <Text dimColor>No workers yet. Ask the lead to delegate a task.</Text>}
       {workers.length > 0 && native.crew.workers.length > 0 && <Text bold>Pi workers</Text>}
       {sections.map(g => <Box key={'group-' + g.name} flexDirection="column">

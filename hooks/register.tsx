@@ -3,7 +3,7 @@ import type { Register } from 'claude-code'
 import type { CrewRequest } from '../types'
 import { registerClaude, startClaude } from './claude'
 import { registerBand } from './band'
-import { PLUGIN, call, connect, connected, openPane, superviseBridge, tickLoop, withProgress } from './crew'
+import { PLUGIN, call, connect, connected, openPane, readDelivery, superviseBridge, tickLoop, withProgress } from './crew'
 import { registerPane } from './pane'
 
 const TOOLS = [
@@ -49,7 +49,7 @@ const TOOLS = [
     name: 'list',
     description:
       'List the crew (number, name, state, waitingOnLead, unread, time since the last message, live intercom status ' +
-      'with the time since it last turned busy or idle, context %, open question) and the live intercom sessions.',
+      'with the time since it last turned busy or idle, context %, open question), delivery health, and live intercom sessions.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
@@ -98,9 +98,11 @@ export const register: Register = on => {
     // `op` names an entry of OPS and the engine has checked `e` against that tool's schema; TS cannot correlate the two.
     const build = OPS[op as ToolOp] as (input: unknown) => CrewRequest
     const answer = await call($, build(e)).catch((error: unknown) => ({
-      raw: JSON.stringify({ ok: false, error: String(error) }),
+      ok: false, error: String(error), raw: JSON.stringify({ ok: false, error: String(error) }),
     }))
-    return { result: answer.raw }
+    if (op !== 'list') return { result: answer.raw }
+    const { bridge, deferred, ackDelayed } = await readDelivery($)
+    return { result: JSON.stringify({ ...(answer.ok ? JSON.parse(answer.raw) : { ok: false, error: answer.error }), leadDelivery: { bridge, deferred, ackDelayed } }) }
   })
 
   // The user's own prompt, typed here or sent over Remote Control, carries the progress that waited. Not a slash

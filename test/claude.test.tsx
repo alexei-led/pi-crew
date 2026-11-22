@@ -3,7 +3,11 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { ClaudeCrew, ClaudeView } from '../types'
 
-const agent: AgentInfo = { id: 'native-a', name: 'api', description: 'Review parser', type: 'general-purpose', status: 'running' }
+const taskRow = {
+  kind: 'local_agent' as const, taskStatus: 'running' as const, label: 'Review parser',
+  startTime: 0, cwd: '/w', tokenCount: 0, tokenSamples: [], hasRow: true,
+}
+const agent: AgentInfo = { id: 'native-a', name: 'api', description: 'Review parser', type: 'general-purpose', status: 'running', ...taskRow }
 const spawn: AgentSpawnInput = { prompt: 'Review parser safely', description: 'Review parser', subagentType: 'general-purpose', provider: { plugin: 'engine', tier: 'core' }, parentModel: 'deepseek', background: true, fork: false, tool_use_id: 'spawn-1', name: 'api' }
 const PANE = { plugin: 'pi-crew', component: 'Pane', requestId: 'pi-crew', surface: 'terminal', props: { title: 'crew', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} } } as const
 

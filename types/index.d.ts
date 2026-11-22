@@ -66,6 +66,7 @@ export type CrewInboundBase = {
   replyTo?: string
   expectsReply: boolean
   text: string
+  receivedAt?: number
 }
 
 /** A report the bridge hands the lead: `idle` is the bridge's own alert; only `done` carries `checks`. */
@@ -80,9 +81,13 @@ export type CrewInbound =
 /** A live intercom session in the roster, as the bridge publishes it (the lead itself left out). */
 export type CrewSession = { id: string; name?: string; status?: string; cwd?: string; model?: string; worker?: string }
 
+export type CrewInbox = { awaitingAck: number; oldestAt?: number }
+export type CrewDelivery = { bridge: 'starting' | 'connected' | 'reconnecting' | 'stopped'; inbox?: CrewInbox; deferred: number; ackDelayed: number }
+
 /** One JSON line the bridge writes to stdout for the mod. */
 export type BridgeEvent =
   | { type: 'ready'; lead: { name: string; id: string }; agtermSession: string | null; workers: CrewWorker[]; feed: CrewMsg[] }
+  | { type: 'inbox'; inbox: CrewInbox }
   | { type: 'workers'; workers: CrewWorker[] }
   | { type: 'feed'; msg: CrewMsg }
   | { type: 'feedset'; feed: CrewMsg[] }
@@ -160,6 +165,7 @@ declare module 'claude-code' {
       seen: Shaped<string[]>
       /** Progress reports waiting for the next turn. */
       held: Shaped<CrewInbound[]>
+      delivery: Shaped<CrewDelivery>
     }
   }
 }
